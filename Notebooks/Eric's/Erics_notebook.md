@@ -63,6 +63,28 @@ Another big point was making sure the drawing looks consistent on the scope. If 
 
 Finally, we sanity-checked SPI speed. Even at a conservative 20 kHz update rate, sending two 12-bit values is only 24 bits per update, which is roughly 24 × 20,000 = 480,000 bits/sec (about 0.48 Mbps) before overhead. That’s far below what the ESP32-S3 SPI can handle, so SPI speed won’t be our bottleneck as long as the DAC can also handle that fast of SPI speed. To reduce noise, power consumption, and timing issues, we also decided to turn off WiFi/Bluetooth during signal generation. 
 
-By the end of the session, we decided to use the ESP32-S3FN8 as our microcontroller and an external dual-channel 12-bit SPI DAC for generating the X/Y signals.
+By the end of the session, we decided to use the ESP32-S3FN8 as our microcontroller and an external dual-channel 12-bit SPI DAC for generating the X/Y signals. [ESP32-S3 datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf)
+
+---
+
+# Entry 3
+**Date:** 02-10-2026
+**Session Duration:** ~3 hours  
+**Location:** In-person meeting
+
+---
+
+For this meeting, we needed to create the formal project proposal and produce a refined block diagram, along with clear high-level goals and subsystem requirements. We also wanted an early power estimate so we could pick realistic regulators and make sure the USB-C supply would be enough.
+
+![Figure 1: System Block Diagram – 2026-02-10](/Notebooks/Eric's/Block_diagram.png)
+
+We made a cleaner system block diagram (Figure 1) that shows the full design from end to end: USB-C power → 3.3 V LDO + −5 V charge pump, an ESP32-S3, two encoders + four buttons, a dual 12-bit DAC, op-amp conditioning, and BNC X/Y outputs. We also clearly labeled the main connections: SPI from the MCU to the DAC, encoder A/B into the MCU, buttons into GPIO, and analog outputs to the BNC connectors.
+
+We then set three top-level project goals that the whole design must meet: (1) functional ±5 V X/Y output, (2) real-time user control (smooth drawing without lag), and (3) single-cable USB-C operation. After that, we broke the system into subsystems (power, MCU/firmware, analog output, UI) and wrote down what each one must do so we can test it later.
+
+We also did a quick power budget to make sure our parts make sense. With RF disabled, we estimated the ESP32-S3 could draw about 200–240 mA, the DAC about 5–10 mA, and the op-amps about 10–20 mA, giving roughly 260–300 mA peak total. With extra margin, we concluded the 3.3 V regulator should be rated at least 500 mA, and we noted the −5 V rail needs enough charge pump capacity to handle the op-amp load.
+
+By the end, we confirmed the overall architecture (separate digital 3.3 V and analog ±5 V domains, level shifting to center at 0 V, short-to-ground tolerant output stage, and careful mixed-signal PCB layout). We approved the updated block diagram and used it as the basis for the proposal. Next, we plan to start the schematic, choose exact DAC and op-amp parts, refine the negative rail approach, and decide the maximum output frequency we want to support.
+
 
 
