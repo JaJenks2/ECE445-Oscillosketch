@@ -98,17 +98,18 @@ By the end, we confirmed the overall architecture (separate digital 3.3 V and an
 For this meeting, we planned on picking all of the components and starting the schematic. 
 
 Here is the list of components that ended up getting chosen:
-- Inverting Charge Pump: LM27762DSST [link]  (https://www.digikey.com/en/products/detail/texas-instruments/LM27762DSST/6234957)
-- Microcontroller: ESP32-S3FN8 [link] (https://www.digikey.com/en/products/detail/espressif-systems/ESP32-S3FN8/15822446)
-- Dual 12-bit DAC: MCP4922 [link] (https://www.digikey.com/en/products/detail/microchip-technology/MCP4922-E-SL/716258)
-- Dual Op-Amp: OPA2192 [link] (https://www.digikey.com/en/products/detail/texas-instruments/OPA2192QDGKRQ1/8322744)
-- LDO: AZ1117C [link] (https://www.digikey.com/en/products/detail/diodes-incorporated/AZ1117CH-3-3TRG1/4470985)
-- TVS Diode Protection: TPD2EUSB30ADRTR [link] (https://www.digikey.com/en/products/detail/texas-instruments/TPD2EUSB30ADRTR/2520830)
-- USB_Connector: USB4215 [link] (https://www.digikey.com/en/products/detail/gct/USB4215-03-A/24395489)
-- Buffer Op-Amp: TLV9061IDBVR [link] (https://www.digikey.com/en/products/detail/texas-instruments/TLV9061IDBVR/9771994?s=N4IgTCBcDaICoBkBqBOADANgIwEkAiAQkiALoC%2BQA)
-- BNC Connector: CONBNC002 [link] (https://www.digikey.com/en/products/detail/texas-instruments/TLV9061IDBVR/9771994?s=N4IgTCBcDaICoBkBqBOADANgIwEkAiAQkiALoC%2BQA)
-- Rotary Encoder: PEC11R-4220F-S0024 [link] (https://www.digikey.com/en/products/detail/bourns-inc/PEC11R-4220F-S0024/4499660?gclsrc=aw.ds&gad_source=1&gad_campaignid=20504615262&gbraid=0AAAAADrbLlh-Xpv7BeVk2DolS7mw4Ei7L&gclid=CjwKCAiAncvMBhBEEiwA9GU_fng9zQn0728rQmIBpjGYQPMPQt_0od9oJhHU58XtyYJZ6IpkS2r6sRoCvZ4QAvD_BwE)
+- Inverting Charge Pump: LM27762DSST [link](https://www.digikey.com/en/products/detail/texas-instruments/LM27762DSST/6234957)
+- Microcontroller: ESP32-S3FN8 [link](https://www.digikey.com/en/products/detail/espressif-systems/ESP32-S3FN8/15822446)
+- Dual 12-bit DAC: MCP4922 [link](https://www.digikey.com/en/products/detail/microchip-technology/MCP4922-E-SL/716258)
+- Dual Op-Amp: OPA2192 [link](https://www.digikey.com/en/products/detail/texas-instruments/OPA2192QDGKRQ1/8322744)
+- LDO: AZ1117C [link](https://www.digikey.com/en/products/detail/diodes-incorporated/AZ1117CH-3-3TRG1/4470985)
+- TVS Diode Protection: TPD2EUSB30ADRTR [link](https://www.digikey.com/en/products/detail/texas-instruments/TPD2EUSB30ADRTR/2520830)
+- USB_Connector: USB4215 [link](https://www.digikey.com/en/products/detail/gct/USB4215-03-A/24395489)
+- Buffer Op-Amp: TLV9061IDBVR [link](https://www.digikey.com/en/products/detail/texas-instruments/TLV9061IDBVR/9771994?s=N4IgTCBcDaICoBkBqBOADANgIwEkAiAQkiALoC%2BQA)
+- BNC Connector: CONBNC002 [link](https://www.digikey.com/en/products/detail/texas-instruments/TLV9061IDBVR/9771994?s=N4IgTCBcDaICoBkBqBOADANgIwEkAiAQkiALoC%2BQA)
+- Rotary Encoder: PEC11R-4220F-S0024 [link](https://www.digikey.com/en/products/detail/bourns-inc/PEC11R-4220F-S0024/4499660?gclsrc=aw.ds&gad_source=1&gad_campaignid=20504615262&gbraid=0AAAAADrbLlh-Xpv7BeVk2DolS7mw4Ei7L&gclid=CjwKCAiAncvMBhBEEiwA9GU_fng9zQn0728rQmIBpjGYQPMPQt_0od9oJhHU58XtyYJZ6IpkS2r6sRoCvZ4QAvD_BwE)
 
 For the KICAD schematic, we made sure to put lots of test points for debugging in the future. At the moment, we are unsure how to power the ESP32-S3 since there are many different examples online. Shown below is the current unfinished schematic (Figure 2). 
 
 ![Figure 2: Unfinished Schematic – 02-12-2026](/Notebooks/Eric's/Unfinished_Schematic.png)
+
