@@ -23,10 +23,10 @@ constexpr size_t MAX_PATH_POINTS = 20000;
 // Interpolation density
 // Increase this for now so lines do not explode the buffer too fast.
 // We can tighten it later once basic motion is confirmed.
-constexpr uint16_t INTERP_CODES_PER_POINT = 500;   // was 4
+constexpr uint16_t INTERP_CODES_PER_POINT = 50;   // was 4
 
 // Encoder mapping
-constexpr int16_t ENCODER_CODES_PER_COUNT = 40;    // was 2
+constexpr int16_t ENCODER_CODES_PER_COUNT = 20;    // was 2
 
 // Front button movement in Etch mode
 constexpr uint16_t BUTTON_MOVE_STEP_CODES = 12;   // was 8
