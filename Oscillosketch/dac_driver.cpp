@@ -2,11 +2,8 @@
 #include "pins.h"
 #include "config.h"
 #include <SPI.h>
-#include <soc/gpio_reg.h>
-#include <soc/soc.h>
 
 static SPIClass g_dacSPI(FSPI);
-static SPISettings g_dacSettings(DAC_SPI_HZ, MSBFIRST, SPI_MODE0);
 
 static inline uint16_t buildDACWord(bool dacB, uint16_t value) {
   value &= 0x0FFF;
@@ -17,57 +14,38 @@ static inline uint16_t buildDACWord(bool dacB, uint16_t value) {
   return ((dacB ? 1 : 0) << 15) | (1 << 13) | (1 << 12) | value;
 }
 
-static inline void fastPinHigh(int pin) {
-  if (pin < 32) {
-    REG_WRITE(GPIO_OUT_W1TS_REG, (1UL << pin));
-  } else {
-    REG_WRITE(GPIO_OUT1_W1TS_REG, (1UL << (pin - 32)));
-  }
-}
-
-static inline void fastPinLow(int pin) {
-  if (pin < 32) {
-    REG_WRITE(GPIO_OUT_W1TC_REG, (1UL << pin));
-  } else {
-    REG_WRITE(GPIO_OUT1_W1TC_REG, (1UL << (pin - 32)));
-  }
-}
-
 static inline void pulseLDAC() {
-  // Replaces the previous digitalWrite(PIN_DAC_LDAC, LOW/HIGH) pulse.
-  fastPinLow(PIN_DAC_LDAC);
-  fastPinHigh(PIN_DAC_LDAC);
+  // Short low pulse; default idle high
+  digitalWrite(PIN_DAC_LDAC, LOW);
+  digitalWrite(PIN_DAC_LDAC, HIGH);
 }
 
 static inline void sendWord(uint16_t cmd) {
-  // Replaces the previous digitalWrite(PIN_DAC_CS, LOW/HIGH) framing.
-  fastPinLow(PIN_DAC_CS);
-  g_dacSPI.transfer16(cmd);
-  fastPinHigh(PIN_DAC_CS);
+  digitalWrite(PIN_DAC_CS, LOW);
+  g_dacSPI.transfer(static_cast<uint8_t>(cmd >> 8));
+  g_dacSPI.transfer(static_cast<uint8_t>(cmd & 0xFF));
+  digitalWrite(PIN_DAC_CS, HIGH);
 }
 
 void dacBegin() {
   pinMode(PIN_DAC_CS, OUTPUT);
   pinMode(PIN_DAC_LDAC, OUTPUT);
 
-  // Replaces the previous digitalWrite startup idle levels.
-  fastPinHigh(PIN_DAC_CS);
-  fastPinHigh(PIN_DAC_LDAC);  // pulsed-LDAC design intent
+  digitalWrite(PIN_DAC_CS, HIGH);
+  digitalWrite(PIN_DAC_LDAC, HIGH);  // pulsed-LDAC design intent
 
   g_dacSPI.begin(PIN_DAC_SCK, -1, PIN_DAC_MOSI, PIN_DAC_CS);
-
-  // Replaces the previous per-point beginTransaction()/endTransaction() calls.
-  // This bus is dedicated to the DAC in this project, so we configure it once here.
-  g_dacSPI.beginTransaction(g_dacSettings);
 }
 
 void dacWriteXY(uint16_t x, uint16_t y) {
   const uint16_t cmdX = buildDACWord(false, x); // DAC A = X
   const uint16_t cmdY = buildDACWord(true,  y); // DAC B = Y
 
+  g_dacSPI.beginTransaction(SPISettings(DAC_SPI_HZ, MSBFIRST, SPI_MODE0));
   sendWord(cmdX);
   sendWord(cmdY);
   pulseLDAC();
+  g_dacSPI.endTransaction();
 }
 
 void dacWriteCentered() {
