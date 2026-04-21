@@ -13,21 +13,29 @@ enum class AppMode : uint8_t {
   USB_STREAM = 3
 };
 
-// Shared state access
+// Core init / mode control
 void drawingBegin();
 void drawingResetToCenter();
 void drawingSetMode(AppMode mode);
 AppMode drawingGetMode();
 
-// Etch-path operations
+// Etch mode drawing path
 bool drawingAppendMoveClamped(int32_t dxCodes, int32_t dyCodes);
 size_t drawingGetPathCount();
 bool drawingIsPathFull();
 XYPoint drawingGetCursor();
 
-// Replay-source access
+// Replay source
 XYPoint drawingGetNextReplayPoint();
 
-// Demo / placeholders
+// Shape demo helpers
 void drawingBuildDemoShape();
 void drawingResetDemoIndex();
+
+// Pong frame helpers
+void drawingSetPongFrame(const XYPoint* pts, size_t count);
+void drawingClearPongFrame();
+
+// Audio frame helpers
+void drawingSetAudioFrame(const XYPoint* pts, size_t count);
+void drawingClearAudioFrame();
