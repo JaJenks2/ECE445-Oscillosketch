@@ -2,6 +2,7 @@
 #include "config.h"
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 static portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -250,9 +251,8 @@ void drawingSetPongFrame(const XYPoint* pts, size_t count) {
   if (count > PONG_FRAME_MAX_POINTS) count = PONG_FRAME_MAX_POINTS;
 
   portENTER_CRITICAL(&g_stateMux);
-  for (size_t i = 0; i < count; ++i) {
-    g_pongFrame[i] = pts[i];
-  }
+  // Replaces the previous element-by-element frame copy loop.
+  memcpy(g_pongFrame, pts, count * sizeof(XYPoint));
   g_pongFrameCount = count;
   if (g_pongReplayIndex >= g_pongFrameCount) {
     g_pongReplayIndex = 0;
@@ -273,9 +273,8 @@ void drawingSetAudioFrame(const XYPoint* pts, size_t count) {
   if (count > AUDIO_FRAME_MAX_POINTS) count = AUDIO_FRAME_MAX_POINTS;
 
   portENTER_CRITICAL(&g_stateMux);
-  for (size_t i = 0; i < count; ++i) {
-    g_audioFrame[i] = pts[i];
-  }
+  // Replaces the previous element-by-element frame copy loop.
+  memcpy(g_audioFrame, pts, count * sizeof(XYPoint));
   g_audioFrameCount = count;
   if (g_audioReplayIndex >= g_audioFrameCount) {
     g_audioReplayIndex = 0;
@@ -293,6 +292,7 @@ void drawingClearAudioFrame() {
 
 XYPoint drawingGetNextReplayPoint() {
   XYPoint out { DAC_CENTER_CODE, DAC_CENTER_CODE };
+  const bool showSquare = ((millis() / 2000UL) % 2UL) != 0UL;
 
   portENTER_CRITICAL(&g_stateMux);
 
@@ -312,7 +312,6 @@ XYPoint drawingGetNextReplayPoint() {
       if (g_demoIndex >= DEMO_POINT_COUNT) {
         g_demoIndex = 0;
       }
-      const bool showSquare = ((millis() / 2000UL) % 2UL) != 0UL;
       out = showSquare ? g_demoSquare[g_demoIndex++] : g_demoCircle[g_demoIndex++];
       break;
     }
