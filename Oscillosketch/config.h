@@ -7,8 +7,8 @@ constexpr uint16_t DAC_MAX_CODE    = 4095;
 constexpr uint16_t DAC_CENTER_CODE = 2048;
 
 // Small safety margin from hard rails
-constexpr uint16_t DRAW_MIN_CODE = 153; //1410 
-constexpr uint16_t DRAW_MAX_CODE = 4025; //3730
+constexpr uint16_t DRAW_MIN_CODE = 1410; //1410
+constexpr uint16_t DRAW_MAX_CODE = 3730; //3730
 
 // Replay timing
 constexpr uint32_t REPLAY_RATE_HZ = 40000;      // was 10000
@@ -23,10 +23,10 @@ constexpr size_t MAX_PATH_POINTS = 20000;
 // Interpolation density
 // Increase this for now so lines do not explode the buffer too fast.
 // We can tighten it later once basic motion is confirmed.
-constexpr uint16_t INTERP_CODES_PER_POINT = 20;   // was 4
+constexpr uint16_t INTERP_CODES_PER_POINT = 8;   // was 4
 
 // Encoder mapping
-constexpr int16_t ENCODER_CODES_PER_COUNT = 12;    // was 2
+constexpr int16_t ENCODER_CODES_PER_COUNT = 8;    // was 2
 
 // Front button movement in Etch mode
 constexpr uint16_t BUTTON_MOVE_STEP_CODES = 12;   // was 8

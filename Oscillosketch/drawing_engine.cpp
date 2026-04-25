@@ -2,6 +2,7 @@
 #include "config.h"
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 static portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -250,9 +251,8 @@ void drawingSetPongFrame(const XYPoint* pts, size_t count) {
   if (count > PONG_FRAME_MAX_POINTS) count = PONG_FRAME_MAX_POINTS;
 
   portENTER_CRITICAL(&g_stateMux);
-  for (size_t i = 0; i < count; ++i) {
-    g_pongFrame[i] = pts[i];
-  }
+  // This replaces the old per-point copy loop with a bulk copy for lower update overhead.
+  memcpy(g_pongFrame, pts, count * sizeof(XYPoint));
   g_pongFrameCount = count;
   if (g_pongReplayIndex >= g_pongFrameCount) {
     g_pongReplayIndex = 0;
@@ -273,9 +273,8 @@ void drawingSetAudioFrame(const XYPoint* pts, size_t count) {
   if (count > AUDIO_FRAME_MAX_POINTS) count = AUDIO_FRAME_MAX_POINTS;
 
   portENTER_CRITICAL(&g_stateMux);
-  for (size_t i = 0; i < count; ++i) {
-    g_audioFrame[i] = pts[i];
-  }
+  // This replaces the old per-point copy loop with a bulk copy for lower update overhead.
+  memcpy(g_audioFrame, pts, count * sizeof(XYPoint));
   g_audioFrameCount = count;
   if (g_audioReplayIndex >= g_audioFrameCount) {
     g_audioReplayIndex = 0;

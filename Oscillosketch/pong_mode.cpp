@@ -106,40 +106,20 @@ static uint8_t g_rightScore = 0;
 
 static uint32_t g_lastUpdateMs = 0;
 
-// The Pong layout was tuned for the earlier ~2320-code draw span.
-// Re-scale all spatial values when the usable analog window changes.
-static constexpr float PONG_REFERENCE_SPAN = 2320.0f;
-static constexpr float PONG_LAYOUT_SCALE =
-  static_cast<float>(DRAW_MAX_CODE - DRAW_MIN_CODE) / PONG_REFERENCE_SPAN;
-
-static inline uint16_t scaleU16(float base) {
-  return static_cast<uint16_t>(lroundf(base * PONG_LAYOUT_SCALE));
-}
-
-static inline float scaleF(float base) {
-  return base * PONG_LAYOUT_SCALE;
-}
-
 // Geometry
-static const uint16_t PADDLE_INSET = scaleU16(180.0f);
-static const uint16_t PADDLE_HALF_HEIGHT = scaleU16(180.0f);
-static const uint16_t PADDLE_MOVE_PER_COUNT = scaleU16(10.0f);
-static const uint16_t BALL_RADIUS = scaleU16(35.0f);
-static const uint16_t PADDLE_COLLISION_HALF_WIDTH = scaleU16(40.0f);
-static const float BALL_SERVE_VX = scaleF(18.0f);
-static const float BALL_SERVE_VY = scaleF(7.0f);
-static const float BALL_HIT_VX_BONUS = scaleF(0.6f);
-static const float BALL_HIT_VY_SCALE = scaleF(16.0f);
+static constexpr uint16_t PADDLE_INSET = 180;
+static constexpr uint16_t PADDLE_HALF_HEIGHT = 180;
+static constexpr uint16_t PADDLE_MOVE_PER_COUNT = 10;
+static constexpr uint16_t BALL_RADIUS = 35;
 
 // Playfield
-static const uint16_t FIELD_MARGIN = scaleU16(120.0f);
-static const uint16_t FIELD_LEFT   = DRAW_MIN_CODE + FIELD_MARGIN;
-static const uint16_t FIELD_RIGHT  = DRAW_MAX_CODE - FIELD_MARGIN;
-static const uint16_t FIELD_TOP    = DRAW_MAX_CODE - FIELD_MARGIN;
-static const uint16_t FIELD_BOTTOM = DRAW_MIN_CODE + FIELD_MARGIN;
+static constexpr uint16_t FIELD_LEFT   = DRAW_MIN_CODE + 120;
+static constexpr uint16_t FIELD_RIGHT  = DRAW_MAX_CODE - 120;
+static constexpr uint16_t FIELD_TOP    = DRAW_MAX_CODE - 120;
+static constexpr uint16_t FIELD_BOTTOM = DRAW_MIN_CODE + 120;
 
-static const uint16_t LEFT_PADDLE_X  = FIELD_LEFT + PADDLE_INSET;
-static const uint16_t RIGHT_PADDLE_X = FIELD_RIGHT - PADDLE_INSET;
+static constexpr uint16_t LEFT_PADDLE_X  = FIELD_LEFT + PADDLE_INSET;
+static constexpr uint16_t RIGHT_PADDLE_X = FIELD_RIGHT - PADDLE_INSET;
 
 static inline float paddleMinY() { return FIELD_BOTTOM + PADDLE_HALF_HEIGHT; }
 static inline float paddleMaxY() { return FIELD_TOP - PADDLE_HALF_HEIGHT; }
@@ -170,8 +150,8 @@ static void pongServe(int direction) {
   g_ballX = DAC_CENTER_CODE;
   g_ballY = DAC_CENTER_CODE;
 
-  g_ballVX = (direction >= 0) ? BALL_SERVE_VX : -BALL_SERVE_VX;
-  g_ballVY = BALL_SERVE_VY;
+  g_ballVX = (direction >= 0) ? 18.0f : -18.0f;
+  g_ballVY = 7.0f;
 
   g_state = PongState::PLAYING;
 }
@@ -223,11 +203,11 @@ static void pongBuildFrame() {
   frameAddBall(static_cast<uint16_t>(g_ballX), static_cast<uint16_t>(g_ballY), BALL_RADIUS);
 
   // Scores
-  const uint16_t digitW = scaleU16(90.0f);
-  const uint16_t digitH = scaleU16(180.0f);
-  const uint16_t gap = scaleU16(70.0f);
+  const uint16_t digitW = 90;
+  const uint16_t digitH = 180;
+  const uint16_t gap = 70;
   const uint16_t centerX = DAC_CENTER_CODE;
-  const uint16_t scoreY = FIELD_TOP - scaleU16(220.0f);
+  const uint16_t scoreY = FIELD_TOP - 220;
 
   frameAddDigit(g_leftScore,  centerX - gap - digitW, scoreY, digitW, digitH);
   frameAddDigit(g_rightScore, centerX + gap,          scoreY, digitW, digitH);
@@ -305,7 +285,7 @@ void pongUpdate(const InputSnapshot& in) {
   // Left paddle collision
   if (g_ballVX < 0 &&
       g_ballX - BALL_RADIUS <= LEFT_PADDLE_X &&
-      g_ballX - BALL_RADIUS >= LEFT_PADDLE_X - PADDLE_COLLISION_HALF_WIDTH &&
+      g_ballX - BALL_RADIUS >= LEFT_PADDLE_X - 40 &&
       g_ballY >= g_leftPaddleY - PADDLE_HALF_HEIGHT &&
       g_ballY <= g_leftPaddleY + PADDLE_HALF_HEIGHT) {
 
@@ -315,14 +295,14 @@ void pongUpdate(const InputSnapshot& in) {
     if (relative < -1.0f) relative = -1.0f;
     if (relative >  1.0f) relative =  1.0f;
 
-    g_ballVX = fabsf(g_ballVX) + BALL_HIT_VX_BONUS;
-    g_ballVY = relative * BALL_HIT_VY_SCALE;
+    g_ballVX = fabsf(g_ballVX) + 0.6f;
+    g_ballVY = relative * 16.0f;
   }
 
   // Right paddle collision
   if (g_ballVX > 0 &&
       g_ballX + BALL_RADIUS >= RIGHT_PADDLE_X &&
-      g_ballX + BALL_RADIUS <= RIGHT_PADDLE_X + PADDLE_COLLISION_HALF_WIDTH &&
+      g_ballX + BALL_RADIUS <= RIGHT_PADDLE_X + 40 &&
       g_ballY >= g_rightPaddleY - PADDLE_HALF_HEIGHT &&
       g_ballY <= g_rightPaddleY + PADDLE_HALF_HEIGHT) {
 
@@ -332,8 +312,8 @@ void pongUpdate(const InputSnapshot& in) {
     if (relative < -1.0f) relative = -1.0f;
     if (relative >  1.0f) relative =  1.0f;
 
-    g_ballVX = -(fabsf(g_ballVX) + BALL_HIT_VX_BONUS);
-    g_ballVY = relative * BALL_HIT_VY_SCALE;
+    g_ballVX = -(fabsf(g_ballVX) + 0.6f);
+    g_ballVY = relative * 16.0f;
   }
 
   // Scoring
