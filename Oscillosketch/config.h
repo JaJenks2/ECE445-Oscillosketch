@@ -11,7 +11,7 @@ constexpr uint16_t DRAW_MIN_CODE = 153; //1410
 constexpr uint16_t DRAW_MAX_CODE = 4025; //3730
 
 // Replay timing
-constexpr uint32_t REPLAY_RATE_HZ = 40000;      // was 10000
+constexpr uint32_t REPLAY_RATE_HZ = 110000;      // was 10000
 constexpr uint32_t REPLAY_PERIOD_US = 1000000UL / REPLAY_RATE_HZ;
 
 // SPI

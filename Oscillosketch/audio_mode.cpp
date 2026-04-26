@@ -69,10 +69,15 @@ static float g_phaseD = 0.0f;
 // =====================================================
 
 static uint32_t g_lastAudioUpdateMs = 0;
-static constexpr float AUDIO_SAMPLE_RATE = static_cast<float>(REPLAY_RATE_HZ);
+
+// Option A from the earlier discussion:
+// Define the audio synthesis/filter reference rate from frame generation cadence,
+// not from replay rate. That keeps "Hz" meaningful for the generated signal.
+static constexpr float AUDIO_SYNTH_SAMPLE_RATE =
+    (1000.0f * static_cast<float>(AUDIO_FRAME_MAX_POINTS)) /
+    static_cast<float>(AUDIO_FRAME_UPDATE_MS);
 
 // Use midpoint of empirically clean region for maximum clean amplitude.
-// If hardware is improved later, this can move back toward DAC_CENTER_CODE.
 static constexpr float AUDIO_CENTER_CODE_F = 0.5f * (DRAW_MIN_CODE + DRAW_MAX_CODE);
 static constexpr float AUDIO_HALF_SPAN_F =
     0.45f * (DRAW_MAX_CODE - DRAW_MIN_CODE);
@@ -117,12 +122,11 @@ static void resetFilterState() {
 }
 
 static void updateFilterCoefficients() {
-  // Enforce non-crossing behavior
   if (g_hpfHz > g_lpfHz) {
     g_hpfHz = g_lpfHz;
   }
 
-  const float dt = 1.0f / AUDIO_SAMPLE_RATE;
+  const float dt = 1.0f / AUDIO_SYNTH_SAMPLE_RATE;
 
   // LPF: alpha = dt / (RC + dt), RC = 1/(2*pi*fc)
   {
@@ -148,7 +152,6 @@ static void adjustCutoffs(const InputSnapshot& in) {
   if (INVERT_AUDIO_LPF_ENCODER) lpfDelta = -lpfDelta;
   if (INVERT_AUDIO_HPF_ENCODER) hpfDelta = -hpfDelta;
 
-  // Log-ish multiplicative adjustment
   if (lpfDelta != 0) {
     g_lpfHz *= powf(1.02f, static_cast<float>(lpfDelta));
     g_lpfHz = clampf(g_lpfHz, AUDIO_LPF_MIN_HZ, AUDIO_LPF_MAX_HZ);
@@ -159,7 +162,6 @@ static void adjustCutoffs(const InputSnapshot& in) {
     g_hpfHz = clampf(g_hpfHz, AUDIO_HPF_MIN_HZ, AUDIO_HPF_MAX_HZ);
   }
 
-  // Non-crossing
   if (g_hpfHz > g_lpfHz) {
     g_hpfHz = g_lpfHz;
   }
@@ -168,7 +170,7 @@ static void adjustCutoffs(const InputSnapshot& in) {
 }
 
 static void getPresetSample(float& left, float& right) {
-  const float dt = 1.0f / AUDIO_SAMPLE_RATE;
+  const float dt = 1.0f / AUDIO_SYNTH_SAMPLE_RATE;
 
   switch (g_preset) {
     case AudioPreset::NOISY_COMPOSITE: {
@@ -216,7 +218,6 @@ static void getPresetSample(float& left, float& right) {
     case AudioPreset::HARMONIC_RICH: {
       const float f = 210.0f;
 
-      // Square-ish odd-harmonic composite
       left =
           0.72f * sinf(g_phaseA) +
           0.24f * sinf(3.0f * g_phaseA) +
@@ -238,7 +239,6 @@ static void getPresetSample(float& left, float& right) {
 static void buildAudioFrame() {
   frameClear();
 
-  // If HPF and LPF meet, treat it as full attenuation
   if (fabsf(g_lpfHz - g_hpfHz) < 1.0f) {
     framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
     drawingSetAudioFrame(g_audioPts, g_audioPtCount);
@@ -250,14 +250,12 @@ static void buildAudioFrame() {
     float xR = 0.0f;
     getPresetSample(xL, xR);
 
-    // HPF then LPF
     xL = updateHPF(g_hpfL, xL);
     xR = updateHPF(g_hpfR, xR);
 
     xL = updateLPF(g_lpfL, xL);
     xR = updateLPF(g_lpfR, xR);
 
-    // Clamp and map to DAC codes
     xL = clampf(xL, -1.0f, 1.0f);
     xR = clampf(xR, -1.0f, 1.0f);
 
@@ -286,12 +284,12 @@ static void cyclePreset() {
       break;
   }
 
-  // Reset phase/filter state for a clean transition
   g_phaseA = 0.0f;
   g_phaseB = 0.0f;
   g_phaseC = 0.0f;
   g_phaseD = 0.0f;
   resetFilterState();
+  updateFilterCoefficients();
 }
 
 // =====================================================
@@ -322,6 +320,9 @@ void audioUpdate(const InputSnapshot& in) {
 
   if (in.resetPressedEdge) {
     cyclePreset();
+    buildAudioFrame();  // immediate visual response on preset change
+    g_lastAudioUpdateMs = millis();
+    return;
   }
 
   const uint32_t now = millis();
