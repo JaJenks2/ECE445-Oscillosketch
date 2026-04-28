@@ -1,4 +1,5 @@
 #include "audio_mode.h"
+#include "audio_stream.h"
 #include "drawing_engine.h"
 #include "config.h"
 #include <math.h>
@@ -31,16 +32,17 @@ static inline void frameMoveToNextPrimitive() {
 }
 
 // =====================================================
-// Source presets
+// Source selection
 // =====================================================
 
-enum class AudioPreset : uint8_t {
+enum class AudioSource : uint8_t {
   NOISY_COMPOSITE = 0,
   SMOOTH_LISSAJOUS = 1,
-  HARMONIC_RICH = 2
+  HARMONIC_RICH = 2,
+  LIVE_SERIAL = 3
 };
 
-static AudioPreset g_preset = AudioPreset::NOISY_COMPOSITE;
+static AudioSource g_source = AudioSource::NOISY_COMPOSITE;
 
 // =====================================================
 // Filter state
@@ -78,14 +80,12 @@ static float g_phaseD = 0.0f;
 // Timing / rendering
 // =====================================================
 
-static uint32_t g_lastAudioUpdateMs = 0;
-static constexpr float AUDIO_SYNTH_SAMPLE_RATE =
-    (1000.0f * static_cast<float>(AUDIO_FRAME_MAX_POINTS)) /
-    static_cast<float>(AUDIO_FRAME_UPDATE_MS);
+static uint32_t g_lastAudioBlockUs = 0;
 
-static constexpr float AUDIO_CENTER_CODE_F = 0.5f * (DRAW_MIN_CODE + DRAW_MAX_CODE);
+static constexpr float AUDIO_CENTER_CODE_F =
+    0.5f * (AUDIO_DRAW_MIN_CODE + AUDIO_DRAW_MAX_CODE);
 static constexpr float AUDIO_HALF_SPAN_F =
-    0.45f * (DRAW_MAX_CODE - DRAW_MIN_CODE);
+    0.45f * (AUDIO_DRAW_MAX_CODE - AUDIO_DRAW_MIN_CODE);
 
 // =====================================================
 // Helpers
@@ -126,12 +126,19 @@ static void resetFilterState() {
   g_hpfR.prevY = 0.0f;
 }
 
+static void resetPresetPhases() {
+  g_phaseA = 0.0f;
+  g_phaseB = 0.0f;
+  g_phaseC = 0.0f;
+  g_phaseD = 0.0f;
+}
+
 static void updateFilterCoefficients() {
   if (g_hpfHz > g_lpfHz) {
     g_hpfHz = g_lpfHz;
   }
 
-  const float dt = 1.0f / AUDIO_SYNTH_SAMPLE_RATE;
+  const float dt = 1.0f / static_cast<float>(AUDIO_SAMPLE_RATE);
 
   {
     const float rc = 1.0f / (2.0f * PI * g_lpfHz);
@@ -172,11 +179,33 @@ static void adjustCutoffs(const InputSnapshot& in) {
   updateFilterCoefficients();
 }
 
-static void getPresetSample(float& left, float& right) {
-  const float dt = 1.0f / AUDIO_SYNTH_SAMPLE_RATE;
+static void cycleSource() {
+  switch (g_source) {
+    case AudioSource::NOISY_COMPOSITE:
+      g_source = AudioSource::SMOOTH_LISSAJOUS;
+      break;
+    case AudioSource::SMOOTH_LISSAJOUS:
+      g_source = AudioSource::HARMONIC_RICH;
+      break;
+    case AudioSource::HARMONIC_RICH:
+      g_source = AudioSource::LIVE_SERIAL;
+      break;
+    case AudioSource::LIVE_SERIAL:
+      g_source = AudioSource::NOISY_COMPOSITE;
+      break;
+  }
 
-  switch (g_preset) {
-    case AudioPreset::NOISY_COMPOSITE: {
+  // Preserve filter cutoff values, but reset state for a clean transition.
+  resetPresetPhases();
+  resetFilterState();
+  updateFilterCoefficients();
+}
+
+static void getPresetSample(AudioSource src, float& left, float& right) {
+  const float dt = 1.0f / static_cast<float>(AUDIO_SAMPLE_RATE);
+
+  switch (src) {
+    case AudioSource::NOISY_COMPOSITE: {
       const float f1 = 180.0f;
       const float f2 = 730.0f;
       const float f3 = 2600.0f;
@@ -201,7 +230,7 @@ static void getPresetSample(float& left, float& right) {
       break;
     }
 
-    case AudioPreset::SMOOTH_LISSAJOUS: {
+    case AudioSource::SMOOTH_LISSAJOUS: {
       const float f1 = 220.0f;
       const float f2 = 440.0f;
 
@@ -218,7 +247,7 @@ static void getPresetSample(float& left, float& right) {
       break;
     }
 
-    case AudioPreset::HARMONIC_RICH: {
+    case AudioSource::HARMONIC_RICH: {
       const float f = 210.0f;
 
       left =
@@ -236,13 +265,72 @@ static void getPresetSample(float& left, float& right) {
       g_phaseA = wrapPhase(g_phaseA + 2.0f * PI * f * dt);
       break;
     }
+
+    case AudioSource::LIVE_SERIAL:
+      left = 0.0f;
+      right = 0.0f;
+      break;
+  }
+}
+
+static void fetchFilteredSourceBlock(float* outL, float* outR, bool& hadLiveFrames, bool& liveStreamActive) {
+  hadLiveFrames = false;
+  liveStreamActive = audioStreamIsActive();
+
+  for (size_t i = 0; i < AUDIO_INPUT_BLOCK_FRAMES; ++i) {
+    float xL = 0.0f;
+    float xR = 0.0f;
+
+    if (g_source == AudioSource::LIVE_SERIAL) {
+      int16_t pcmL = 0;
+      int16_t pcmR = 0;
+
+      if (audioStreamPopFrame(pcmL, pcmR)) {
+        xL = static_cast<float>(pcmL) / 32768.0f;
+        xR = static_cast<float>(pcmR) / 32768.0f;
+        hadLiveFrames = true;
+      } else {
+        // Underrun / no stream: feed silence
+        xL = 0.0f;
+        xR = 0.0f;
+      }
+    } else {
+      getPresetSample(g_source, xL, xR);
+    }
+
+    // HPF then LPF
+    xL = updateHPF(g_hpfL, xL);
+    xR = updateHPF(g_hpfR, xR);
+
+    xL = updateLPF(g_lpfL, xL);
+    xR = updateLPF(g_lpfR, xR);
+
+    outL[i] = clampf(xL, -1.0f, 1.0f);
+    outR[i] = clampf(xR, -1.0f, 1.0f);
   }
 }
 
 static void buildAudioFrame() {
   frameClear();
 
+  // Full attenuation when HPF meets LPF
   if (fabsf(g_lpfHz - g_hpfHz) < 1.0f) {
+    frameMoveToNextPrimitive();
+    framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
+    drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
+    return;
+  }
+
+  float blockL[AUDIO_INPUT_BLOCK_FRAMES];
+  float blockR[AUDIO_INPUT_BLOCK_FRAMES];
+
+  bool hadLiveFrames = false;
+  bool liveStreamActive = false;
+  fetchFilteredSourceBlock(blockL, blockR, hadLiveFrames, liveStreamActive);
+
+  // If the live source is selected but we have no active stream and no frames,
+  // collapse to center dot rather than replaying a large silent block.
+  if (g_source == AudioSource::LIVE_SERIAL && !liveStreamActive && !hadLiveFrames) {
     frameMoveToNextPrimitive();
     framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
     drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
@@ -251,65 +339,55 @@ static void buildAudioFrame() {
 
   frameMoveToNextPrimitive();
 
-  for (size_t i = 0; i < AUDIO_FRAME_MAX_POINTS; ++i) {
-    float xL = 0.0f;
-    float xR = 0.0f;
-    getPresetSample(xL, xR);
-
-    xL = updateHPF(g_hpfL, xL);
-    xR = updateHPF(g_hpfR, xR);
-
-    xL = updateLPF(g_lpfL, xL);
-    xR = updateLPF(g_lpfR, xR);
-
-    xL = clampf(xL, -1.0f, 1.0f);
-    xR = clampf(xR, -1.0f, 1.0f);
-
-    const int32_t dacX = static_cast<int32_t>(lroundf(AUDIO_CENTER_CODE_F + AUDIO_HALF_SPAN_F * xL));
-    const int32_t dacY = static_cast<int32_t>(lroundf(AUDIO_CENTER_CODE_F + AUDIO_HALF_SPAN_F * xR));
+  if (AUDIO_FRAME_MAX_POINTS <= 1 || AUDIO_INPUT_BLOCK_FRAMES <= 1) {
+    const int32_t dacX = static_cast<int32_t>(lroundf(AUDIO_CENTER_CODE_F + AUDIO_HALF_SPAN_F * blockL[0]));
+    const int32_t dacY = static_cast<int32_t>(lroundf(AUDIO_CENTER_CODE_F + AUDIO_HALF_SPAN_F * blockR[0]));
 
     framePush(
-      static_cast<uint16_t>(clampf(static_cast<float>(dacX), DRAW_MIN_CODE, DRAW_MAX_CODE)),
-      static_cast<uint16_t>(clampf(static_cast<float>(dacY), DRAW_MIN_CODE, DRAW_MAX_CODE))
+      static_cast<uint16_t>(clampf(static_cast<float>(dacX), AUDIO_DRAW_MIN_CODE, AUDIO_DRAW_MAX_CODE)),
+      static_cast<uint16_t>(clampf(static_cast<float>(dacY), AUDIO_DRAW_MIN_CODE, AUDIO_DRAW_MAX_CODE))
     );
+  } else {
+    for (size_t j = 0; j < AUDIO_FRAME_MAX_POINTS; ++j) {
+      const float srcPos =
+          (static_cast<float>(j) * static_cast<float>(AUDIO_INPUT_BLOCK_FRAMES - 1)) /
+          static_cast<float>(AUDIO_FRAME_MAX_POINTS - 1);
+
+      const size_t i0 = static_cast<size_t>(srcPos);
+      const size_t i1 = (i0 + 1 < AUDIO_INPUT_BLOCK_FRAMES) ? (i0 + 1) : i0;
+      const float frac = srcPos - static_cast<float>(i0);
+
+      const float xL = blockL[i0] + frac * (blockL[i1] - blockL[i0]);
+      const float xR = blockR[i0] + frac * (blockR[i1] - blockR[i0]);
+
+      const int32_t dacX = static_cast<int32_t>(lroundf(AUDIO_CENTER_CODE_F + AUDIO_HALF_SPAN_F * xL));
+      const int32_t dacY = static_cast<int32_t>(lroundf(AUDIO_CENTER_CODE_F + AUDIO_HALF_SPAN_F * xR));
+
+      framePush(
+        static_cast<uint16_t>(clampf(static_cast<float>(dacX), AUDIO_DRAW_MIN_CODE, AUDIO_DRAW_MAX_CODE)),
+        static_cast<uint16_t>(clampf(static_cast<float>(dacY), AUDIO_DRAW_MIN_CODE, AUDIO_DRAW_MAX_CODE))
+      );
+    }
   }
 
   drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
 }
 
-static void cyclePreset() {
-  switch (g_preset) {
-    case AudioPreset::NOISY_COMPOSITE:
-      g_preset = AudioPreset::SMOOTH_LISSAJOUS;
-      break;
-    case AudioPreset::SMOOTH_LISSAJOUS:
-      g_preset = AudioPreset::HARMONIC_RICH;
-      break;
-    case AudioPreset::HARMONIC_RICH:
-      g_preset = AudioPreset::NOISY_COMPOSITE;
-      break;
-  }
-
-  g_phaseA = 0.0f;
-  g_phaseB = 0.0f;
-  g_phaseC = 0.0f;
-  g_phaseD = 0.0f;
-  resetFilterState();
-  updateFilterCoefficients();
-}
+// =====================================================
+// Public API
+// =====================================================
 
 void audioBegin() {
-  g_preset = AudioPreset::NOISY_COMPOSITE;
+  g_source = AudioSource::NOISY_COMPOSITE;
   g_hpfHz = AUDIO_HPF_MIN_HZ;
   g_lpfHz = AUDIO_LPF_MAX_HZ;
-  g_phaseA = 0.0f;
-  g_phaseB = 0.0f;
-  g_phaseC = 0.0f;
-  g_phaseD = 0.0f;
-  g_lastAudioUpdateMs = millis();
+  g_lastAudioBlockUs = micros();
 
+  resetPresetPhases();
   resetFilterState();
   updateFilterCoefficients();
+
+  audioStreamBegin();
   buildAudioFrame();
 }
 
@@ -318,20 +396,31 @@ void audioOnEnter() {
 }
 
 void audioUpdate(const InputSnapshot& in) {
+  // Keep serial polling active whenever we are in Audio Mode, even if a preset
+  // is selected, so the live stream can already fill in the background.
+  audioStreamPollSerial();
+
   adjustCutoffs(in);
 
+  // S2 cycles sub-sources inside Audio Mode:
+  // Noisy -> Smooth -> Harmonic -> Live Serial -> back to Noisy
   if (in.resetPressedEdge) {
-    cyclePreset();
+    cycleSource();
     buildAudioFrame();
-    g_lastAudioUpdateMs = millis();
+    g_lastAudioBlockUs = micros();
     return;
   }
 
-  const uint32_t now = millis();
-  if ((now - g_lastAudioUpdateMs) < AUDIO_FRAME_UPDATE_MS) {
+  const uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - g_lastAudioBlockUs) < AUDIO_BLOCK_PERIOD_US) {
     return;
   }
-  g_lastAudioUpdateMs = now;
+
+  // Keep the block cadence steady
+  g_lastAudioBlockUs += AUDIO_BLOCK_PERIOD_US;
+  if ((uint32_t)(nowUs - g_lastAudioBlockUs) > AUDIO_BLOCK_PERIOD_US) {
+    g_lastAudioBlockUs = nowUs;
+  }
 
   buildAudioFrame();
 }
