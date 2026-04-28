@@ -2,8 +2,9 @@
 #include <Arduino.h>
 
 struct AudioStreamStats {
-  uint32_t packetsReceived;
-  uint32_t sequenceGaps;
+  uint32_t packetsAccepted;
+  uint32_t duplicatePackets;
+  uint32_t sequenceErrors;
   uint32_t parserResets;
   uint32_t bufferOverwrites;
   uint32_t underruns;

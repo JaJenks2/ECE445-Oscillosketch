@@ -55,18 +55,16 @@ constexpr bool INVERT_PONG_RIGHT_PADDLE = true;
 // Audio mode configuration
 // =====================================================
 
-// Explicit configurable audio sample rate.
-// Start at 32 kHz. Later you can try 44.1 kHz or 48 kHz if desired.
-constexpr uint32_t AUDIO_SAMPLE_RATE = 32000;
+// Fixed live-stream working target.
+constexpr uint32_t AUDIO_SAMPLE_RATE = 16000;
 
 // Input block size processed by the ESP32 each audio update.
-constexpr size_t AUDIO_INPUT_BLOCK_FRAMES = 256;
+constexpr size_t AUDIO_INPUT_BLOCK_FRAMES = 128;
 
-// On-the-wire PCM packet payload size from Python -> ESP32.
-constexpr size_t AUDIO_PACKET_FRAMES = 512;
+// On-the-wire PCM payload size per transport packet.
+constexpr size_t AUDIO_PACKET_FRAMES = 256;
 
 // Ring buffer size on the ESP32 for live serial audio.
-// 8192 frames at 32 kHz is about 256 ms of stereo audio.
 constexpr size_t AUDIO_BUFFER_FRAMES = 8192;
 
 // Derived timing for one audio block.
@@ -75,19 +73,17 @@ constexpr uint32_t AUDIO_BLOCK_PERIOD_US =
         (1000000ULL * AUDIO_INPUT_BLOCK_FRAMES + AUDIO_SAMPLE_RATE / 2) / AUDIO_SAMPLE_RATE);
 
 // Number of XY replay points generated per audio block.
-// Chosen so one frame approximately matches the replay consumption over one block period.
 constexpr size_t AUDIO_FRAME_MAX_POINTS =
     static_cast<size_t>(
         (static_cast<uint64_t>(REPLAY_RATE_HZ) * AUDIO_INPUT_BLOCK_FRAMES + AUDIO_SAMPLE_RATE / 2) / AUDIO_SAMPLE_RATE);
 
-// Live-serial baud rate for USB CDC / Serial transport.
-// The ESP32-S3 native USB CDC stack typically ignores the "baud" physically,
-// but setting it consistently is still useful on the host side.
+// Live-serial USB CDC transport.
 constexpr uint32_t AUDIO_SERIAL_BAUD = 2000000;
-
-// Live-stream timeout window.
-// If no packets arrive for this long, the stream is considered inactive.
 constexpr uint32_t AUDIO_STREAM_ACTIVE_TIMEOUT_MS = 500;
+
+// Playback gating / rebuffer thresholds.
+constexpr size_t AUDIO_LIVE_START_FILL_FRAMES    = 4096;
+constexpr size_t AUDIO_LIVE_REBUFFER_LOW_FRAMES  = 512;
 
 // Audio mode uses tighter DAC bounds because laptop-powered operation
 // has shown the bad edge behavior at the wider charger-powered limits.
@@ -96,9 +92,9 @@ constexpr uint16_t AUDIO_DRAW_MAX_CODE = 3730;
 
 // Audio mode cutoff ranges in Hz
 constexpr float AUDIO_HPF_MIN_HZ = 20.0f;
-constexpr float AUDIO_HPF_MAX_HZ = 8000.0f;
-constexpr float AUDIO_LPF_MIN_HZ = 100.0f;
-constexpr float AUDIO_LPF_MAX_HZ = 12000.0f;
+constexpr float AUDIO_HPF_MAX_HZ = 4000.0f;
+constexpr float AUDIO_LPF_MIN_HZ = 80.0f;
+constexpr float AUDIO_LPF_MAX_HZ = 7000.0f;
 
 // Audio mode encoder direction controls
 constexpr bool INVERT_AUDIO_LPF_ENCODER = false;

@@ -12,7 +12,6 @@ static XYPoint g_audioPts[AUDIO_FRAME_MAX_POINTS];
 static bool g_blankBefore[AUDIO_FRAME_MAX_POINTS];
 static size_t g_audioPtCount = 0;
 static bool g_nextPointStartsBlanked = true;
-static uint32_t g_lastAudioStatsPrintMs = 0;
 
 static inline void frameClear() {
   g_audioPtCount = 0;
@@ -44,6 +43,13 @@ enum class AudioSource : uint8_t {
 };
 
 static AudioSource g_source = AudioSource::NOISY_COMPOSITE;
+
+enum class LivePlaybackState : uint8_t {
+  HOLDING = 0,
+  RUNNING = 1
+};
+
+static LivePlaybackState g_liveState = LivePlaybackState::HOLDING;
 
 // =====================================================
 // Filter state
@@ -196,7 +202,7 @@ static void cycleSource() {
       break;
   }
 
-  // Preserve filter cutoff values, but reset state for a clean transition.
+  g_liveState = LivePlaybackState::HOLDING;
   resetPresetPhases();
   resetFilterState();
   updateFilterCoefficients();
@@ -274,9 +280,32 @@ static void getPresetSample(AudioSource src, float& left, float& right) {
   }
 }
 
-static void fetchFilteredSourceBlock(float* outL, float* outR, bool& hadLiveFrames, bool& liveStreamActive) {
-  hadLiveFrames = false;
-  liveStreamActive = audioStreamIsActive();
+static void updateLivePlaybackState() {
+  if (g_source != AudioSource::LIVE_SERIAL) {
+    g_liveState = LivePlaybackState::HOLDING;
+    return;
+  }
+
+  const bool active = audioStreamIsActive();
+  const size_t fill = audioStreamAvailableFrames();
+
+  switch (g_liveState) {
+    case LivePlaybackState::HOLDING:
+      if (active && fill >= AUDIO_LIVE_START_FILL_FRAMES) {
+        g_liveState = LivePlaybackState::RUNNING;
+      }
+      break;
+
+    case LivePlaybackState::RUNNING:
+      if (!active || fill < AUDIO_LIVE_REBUFFER_LOW_FRAMES) {
+        g_liveState = LivePlaybackState::HOLDING;
+      }
+      break;
+  }
+}
+
+static bool fetchFilteredSourceBlock(float* outL, float* outR) {
+  bool hadLiveFrames = false;
 
   for (size_t i = 0; i < AUDIO_INPUT_BLOCK_FRAMES; ++i) {
     float xL = 0.0f;
@@ -291,7 +320,6 @@ static void fetchFilteredSourceBlock(float* outL, float* outR, bool& hadLiveFram
         xR = static_cast<float>(pcmR) / 32768.0f;
         hadLiveFrames = true;
       } else {
-        // Underrun / no stream: feed silence
         xL = 0.0f;
         xR = 0.0f;
       }
@@ -299,23 +327,31 @@ static void fetchFilteredSourceBlock(float* outL, float* outR, bool& hadLiveFram
       getPresetSample(g_source, xL, xR);
     }
 
-    // HPF then LPF
     xL = updateHPF(g_hpfL, xL);
     xR = updateHPF(g_hpfR, xR);
-
     xL = updateLPF(g_lpfL, xL);
     xR = updateLPF(g_lpfR, xR);
 
     outL[i] = clampf(xL, -1.0f, 1.0f);
     outR[i] = clampf(xR, -1.0f, 1.0f);
   }
+
+  return hadLiveFrames;
 }
 
 static void buildAudioFrame() {
   frameClear();
 
-  // Full attenuation when HPF meets LPF
   if (fabsf(g_lpfHz - g_hpfHz) < 1.0f) {
+    frameMoveToNextPrimitive();
+    framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
+    drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
+    return;
+  }
+
+  updateLivePlaybackState();
+
+  if (g_source == AudioSource::LIVE_SERIAL && g_liveState != LivePlaybackState::RUNNING) {
     frameMoveToNextPrimitive();
     framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
     drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
@@ -324,14 +360,10 @@ static void buildAudioFrame() {
 
   float blockL[AUDIO_INPUT_BLOCK_FRAMES];
   float blockR[AUDIO_INPUT_BLOCK_FRAMES];
+  const bool hadFrames = fetchFilteredSourceBlock(blockL, blockR);
 
-  bool hadLiveFrames = false;
-  bool liveStreamActive = false;
-  fetchFilteredSourceBlock(blockL, blockR, hadLiveFrames, liveStreamActive);
-
-  // If the live source is selected but we have no active stream and no frames,
-  // collapse to center dot rather than replaying a large silent block.
-  if (g_source == AudioSource::LIVE_SERIAL && !liveStreamActive && !hadLiveFrames) {
+  if (g_source == AudioSource::LIVE_SERIAL && !hadFrames) {
+    g_liveState = LivePlaybackState::HOLDING;
     frameMoveToNextPrimitive();
     framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
     drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
@@ -374,12 +406,9 @@ static void buildAudioFrame() {
   drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
 }
 
-// =====================================================
-// Public API
-// =====================================================
-
 void audioBegin() {
   g_source = AudioSource::NOISY_COMPOSITE;
+  g_liveState = LivePlaybackState::HOLDING;
   g_hpfHz = AUDIO_HPF_MIN_HZ;
   g_lpfHz = AUDIO_LPF_MAX_HZ;
   g_lastAudioBlockUs = micros();
@@ -393,38 +422,15 @@ void audioBegin() {
 }
 
 void audioOnEnter() {
+  g_liveState = LivePlaybackState::HOLDING;
   buildAudioFrame();
 }
 
 void audioUpdate(const InputSnapshot& in) {
-  // Keep serial polling active whenever we are in Audio Mode, even if a preset
-  // is selected, so the live stream can already fill in the background.
-  audioStreamPollSerial();
-
-    const uint32_t nowMs = millis();
-  if ((nowMs - g_lastAudioStatsPrintMs) >= 250) {
-    g_lastAudioStatsPrintMs = nowMs;
-
-    AudioStreamStats st;
-    audioStreamGetStats(st);
-
-    Serial.printf(
-        "STAT fill=%u max=%u pkts=%lu gaps=%lu pres=%lu over=%lu underr=%lu active=%u src=%u\n",
-        static_cast<unsigned>(st.currentFill),
-        static_cast<unsigned>(st.maxFill),
-        static_cast<unsigned long>(st.packetsReceived),
-        static_cast<unsigned long>(st.sequenceGaps),
-        static_cast<unsigned long>(st.parserResets),
-        static_cast<unsigned long>(st.bufferOverwrites),
-        static_cast<unsigned long>(st.underruns),
-        st.active ? 1 : 0,
-        static_cast<unsigned>(g_source));
-  }
+  audioStreamPollSerial();  // no-op in the RX-task transport version
 
   adjustCutoffs(in);
 
-  // S2 cycles sub-sources inside Audio Mode:
-  // Noisy -> Smooth -> Harmonic -> Live Serial -> back to Noisy
   if (in.resetPressedEdge) {
     cycleSource();
     buildAudioFrame();
@@ -437,7 +443,6 @@ void audioUpdate(const InputSnapshot& in) {
     return;
   }
 
-  // Keep the block cadence steady
   g_lastAudioBlockUs += AUDIO_BLOCK_PERIOD_US;
   if ((uint32_t)(nowUs - g_lastAudioBlockUs) > AUDIO_BLOCK_PERIOD_US) {
     g_lastAudioBlockUs = nowUs;
