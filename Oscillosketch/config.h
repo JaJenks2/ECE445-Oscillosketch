@@ -63,11 +63,11 @@ constexpr uint32_t AUDIO_SAMPLE_RATE = 32000;
 constexpr size_t AUDIO_INPUT_BLOCK_FRAMES = 256;
 
 // On-the-wire PCM packet payload size from Python -> ESP32.
-constexpr size_t AUDIO_PACKET_FRAMES = 128;
+constexpr size_t AUDIO_PACKET_FRAMES = 512;
 
 // Ring buffer size on the ESP32 for live serial audio.
-// 4096 frames at 32 kHz is about 128 ms of stereo audio.
-constexpr size_t AUDIO_BUFFER_FRAMES = 4096;
+// 8192 frames at 32 kHz is about 256 ms of stereo audio.
+constexpr size_t AUDIO_BUFFER_FRAMES = 8192;
 
 // Derived timing for one audio block.
 constexpr uint32_t AUDIO_BLOCK_PERIOD_US =
@@ -87,7 +87,7 @@ constexpr uint32_t AUDIO_SERIAL_BAUD = 2000000;
 
 // Live-stream timeout window.
 // If no packets arrive for this long, the stream is considered inactive.
-constexpr uint32_t AUDIO_STREAM_ACTIVE_TIMEOUT_MS = 250;
+constexpr uint32_t AUDIO_STREAM_ACTIVE_TIMEOUT_MS = 500;
 
 // Audio mode uses tighter DAC bounds because laptop-powered operation
 // has shown the bad edge behavior at the wider charger-powered limits.

@@ -24,6 +24,7 @@ static StereoFrame g_ring[AUDIO_BUFFER_FRAMES];
 static size_t g_ringHead = 0;
 static size_t g_ringTail = 0;
 static size_t g_ringCount = 0;
+static size_t g_maxRingCount = 0;
 
 static ParseState g_parseState = ParseState::WAIT_MAGIC0;
 static uint8_t g_header[6];
@@ -36,24 +37,41 @@ static uint16_t g_lastSeq = 0;
 static bool g_haveSeq = false;
 static uint32_t g_lastPacketMs = 0;
 
+// Telemetry counters
+static uint32_t g_packetsReceived = 0;
+static uint32_t g_sequenceGaps = 0;
+static uint32_t g_parserResets = 0;
+static uint32_t g_bufferOverwrites = 0;
+static uint32_t g_underruns = 0;
+
 static inline void ringPush(int16_t left, int16_t right) {
   if (g_ringCount >= AUDIO_BUFFER_FRAMES) {
     // Overwrite oldest to keep latency bounded.
     g_ringTail = (g_ringTail + 1) % AUDIO_BUFFER_FRAMES;
     g_ringCount--;
+    g_bufferOverwrites++;
   }
 
   g_ring[g_ringHead].left = left;
   g_ring[g_ringHead].right = right;
   g_ringHead = (g_ringHead + 1) % AUDIO_BUFFER_FRAMES;
   g_ringCount++;
+
+  if (g_ringCount > g_maxRingCount) {
+    g_maxRingCount = g_ringCount;
+  }
 }
 
-static void resetParser() {
+static void resetParserNoCount() {
   g_parseState = ParseState::WAIT_MAGIC0;
   g_headerIndex = 0;
   g_payloadLen = 0;
   g_payloadIndex = 0;
+}
+
+static void resetParserCounted() {
+  g_parserResets++;
+  resetParserNoCount();
 }
 
 static void handleCompletePacket() {
@@ -70,26 +88,29 @@ static void handleCompletePacket() {
       (static_cast<uint16_t>(g_header[5]) << 8);
 
   if (type != AUDIO_PKT_TYPE_PCM_STEREO_S16) {
-    resetParser();
+    resetParserCounted();
     return;
   }
 
   if (frameCount == 0 || frameCount > AUDIO_PACKET_FRAMES) {
-    resetParser();
+    resetParserCounted();
     return;
   }
 
   const size_t expectedPayloadLen = static_cast<size_t>(frameCount) * 4;
   if (g_payloadLen != expectedPayloadLen) {
-    resetParser();
+    resetParserCounted();
     return;
   }
 
-  // Sequence is currently tracked only for sanity/future debug.
   if (!g_haveSeq) {
     g_lastSeq = seq;
     g_haveSeq = true;
   } else {
+    const uint16_t expected = static_cast<uint16_t>(g_lastSeq + 1);
+    if (seq != expected) {
+      g_sequenceGaps++;
+    }
     g_lastSeq = seq;
   }
 
@@ -108,8 +129,54 @@ static void handleCompletePacket() {
     ringPush(left, right);
   }
 
+  g_packetsReceived++;
   g_lastPacketMs = millis();
-  resetParser();
+  resetParserNoCount();
+}
+
+static void parseByte(uint8_t b) {
+  switch (g_parseState) {
+    case ParseState::WAIT_MAGIC0:
+      if (b == AUDIO_PKT_MAGIC0) {
+        g_parseState = ParseState::WAIT_MAGIC1;
+      }
+      break;
+
+    case ParseState::WAIT_MAGIC1:
+      if (b == AUDIO_PKT_MAGIC1) {
+        g_parseState = ParseState::READ_HEADER;
+        g_headerIndex = 0;
+      } else if (b == AUDIO_PKT_MAGIC0) {
+        g_parseState = ParseState::WAIT_MAGIC1;
+      } else {
+        g_parseState = ParseState::WAIT_MAGIC0;
+      }
+      break;
+
+    case ParseState::READ_HEADER:
+      g_header[g_headerIndex++] = b;
+      if (g_headerIndex >= sizeof(g_header)) {
+        const uint16_t frameCount =
+            static_cast<uint16_t>(g_header[4]) |
+            (static_cast<uint16_t>(g_header[5]) << 8);
+
+        if (frameCount == 0 || frameCount > AUDIO_PACKET_FRAMES) {
+          resetParserCounted();
+        } else {
+          g_payloadLen = static_cast<size_t>(frameCount) * 4;
+          g_payloadIndex = 0;
+          g_parseState = ParseState::READ_PAYLOAD;
+        }
+      }
+      break;
+
+    case ParseState::READ_PAYLOAD:
+      g_payload[g_payloadIndex++] = b;
+      if (g_payloadIndex >= g_payloadLen) {
+        handleCompletePacket();
+      }
+      break;
+  }
 }
 
 }  // namespace
@@ -123,62 +190,31 @@ void audioStreamReset() {
   g_ringHead = 0;
   g_ringTail = 0;
   g_ringCount = 0;
+  g_maxRingCount = 0;
+
   g_haveSeq = false;
   g_lastSeq = 0;
   g_lastPacketMs = 0;
-  resetParser();
+
+  g_packetsReceived = 0;
+  g_sequenceGaps = 0;
+  g_parserResets = 0;
+  g_bufferOverwrites = 0;
+  g_underruns = 0;
+
+  resetParserNoCount();
 }
 
 void audioStreamPollSerial() {
+  static uint8_t rxBuf[256];
+
   while (Serial.available() > 0) {
-    const int raw = Serial.read();
-    if (raw < 0) {
-      return;
-    }
+    const size_t avail = static_cast<size_t>(Serial.available());
+    const size_t toRead = min(avail, sizeof(rxBuf));
+    const size_t got = Serial.readBytes(reinterpret_cast<char*>(rxBuf), toRead);
 
-    const uint8_t b = static_cast<uint8_t>(raw);
-
-    switch (g_parseState) {
-      case ParseState::WAIT_MAGIC0:
-        if (b == AUDIO_PKT_MAGIC0) {
-          g_parseState = ParseState::WAIT_MAGIC1;
-        }
-        break;
-
-      case ParseState::WAIT_MAGIC1:
-        if (b == AUDIO_PKT_MAGIC1) {
-          g_parseState = ParseState::READ_HEADER;
-          g_headerIndex = 0;
-        } else if (b == AUDIO_PKT_MAGIC0) {
-          g_parseState = ParseState::WAIT_MAGIC1;
-        } else {
-          g_parseState = ParseState::WAIT_MAGIC0;
-        }
-        break;
-
-      case ParseState::READ_HEADER:
-        g_header[g_headerIndex++] = b;
-        if (g_headerIndex >= sizeof(g_header)) {
-          const uint16_t frameCount =
-              static_cast<uint16_t>(g_header[4]) |
-              (static_cast<uint16_t>(g_header[5]) << 8);
-
-          if (frameCount == 0 || frameCount > AUDIO_PACKET_FRAMES) {
-            resetParser();
-          } else {
-            g_payloadLen = static_cast<size_t>(frameCount) * 4;
-            g_payloadIndex = 0;
-            g_parseState = ParseState::READ_PAYLOAD;
-          }
-        }
-        break;
-
-      case ParseState::READ_PAYLOAD:
-        g_payload[g_payloadIndex++] = b;
-        if (g_payloadIndex >= g_payloadLen) {
-          handleCompletePacket();
-        }
-        break;
+    for (size_t i = 0; i < got; ++i) {
+      parseByte(rxBuf[i]);
     }
   }
 }
@@ -189,6 +225,7 @@ size_t audioStreamAvailableFrames() {
 
 bool audioStreamPopFrame(int16_t& left, int16_t& right) {
   if (g_ringCount == 0) {
+    g_underruns++;
     return false;
   }
 
@@ -205,4 +242,16 @@ bool audioStreamIsActive() {
     return false;
   }
   return (millis() - g_lastPacketMs) <= AUDIO_STREAM_ACTIVE_TIMEOUT_MS;
+}
+
+void audioStreamGetStats(AudioStreamStats& out) {
+  out.packetsReceived = g_packetsReceived;
+  out.sequenceGaps = g_sequenceGaps;
+  out.parserResets = g_parserResets;
+  out.bufferOverwrites = g_bufferOverwrites;
+  out.underruns = g_underruns;
+  out.currentFill = g_ringCount;
+  out.maxFill = g_maxRingCount;
+  out.lastSeq = g_lastSeq;
+  out.active = audioStreamIsActive();
 }

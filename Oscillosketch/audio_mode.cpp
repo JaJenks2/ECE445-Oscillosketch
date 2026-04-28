@@ -12,6 +12,7 @@ static XYPoint g_audioPts[AUDIO_FRAME_MAX_POINTS];
 static bool g_blankBefore[AUDIO_FRAME_MAX_POINTS];
 static size_t g_audioPtCount = 0;
 static bool g_nextPointStartsBlanked = true;
+static uint32_t g_lastAudioStatsPrintMs = 0;
 
 static inline void frameClear() {
   g_audioPtCount = 0;
@@ -399,6 +400,26 @@ void audioUpdate(const InputSnapshot& in) {
   // Keep serial polling active whenever we are in Audio Mode, even if a preset
   // is selected, so the live stream can already fill in the background.
   audioStreamPollSerial();
+
+    const uint32_t nowMs = millis();
+  if ((nowMs - g_lastAudioStatsPrintMs) >= 250) {
+    g_lastAudioStatsPrintMs = nowMs;
+
+    AudioStreamStats st;
+    audioStreamGetStats(st);
+
+    Serial.printf(
+        "STAT fill=%u max=%u pkts=%lu gaps=%lu pres=%lu over=%lu underr=%lu active=%u src=%u\n",
+        static_cast<unsigned>(st.currentFill),
+        static_cast<unsigned>(st.maxFill),
+        static_cast<unsigned long>(st.packetsReceived),
+        static_cast<unsigned long>(st.sequenceGaps),
+        static_cast<unsigned long>(st.parserResets),
+        static_cast<unsigned long>(st.bufferOverwrites),
+        static_cast<unsigned long>(st.underruns),
+        st.active ? 1 : 0,
+        static_cast<unsigned>(g_source));
+  }
 
   adjustCutoffs(in);
 
