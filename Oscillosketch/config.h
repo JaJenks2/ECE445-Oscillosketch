@@ -68,3 +68,12 @@ constexpr float AUDIO_LPF_MAX_HZ = 12000.0f;
 // Audio mode encoder direction controls
 constexpr bool INVERT_AUDIO_LPF_ENCODER = false;
 constexpr bool INVERT_AUDIO_HPF_ENCODER = false;
+
+
+// Z blanking
+constexpr bool ENABLE_ZBLANK = true;
+constexpr bool ZBLANK_ACTIVE_HIGH = true;
+
+// Stretch blanking for several replay points so the Tek 2225 has
+// enough time to visibly reduce beam intensity on retrace/reposition.
+constexpr uint8_t ZBLANK_STRETCH_POINTS = 2;

@@ -11,6 +11,9 @@ constexpr int PIN_DAC_SCK  = 17;
 constexpr int PIN_DAC_CS   = 18;
 constexpr int PIN_DAC_LDAC = 15;
 
+// Z blanking output
+constexpr int PIN_ZBLANK = 4;
+
 // Left rotary encoder (S1)
 constexpr int PIN_LEFT_ENC_A   = 36;
 constexpr int PIN_LEFT_ENC_B   = 35;

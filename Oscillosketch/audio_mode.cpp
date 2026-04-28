@@ -8,16 +8,26 @@
 // =====================================================
 
 static XYPoint g_audioPts[AUDIO_FRAME_MAX_POINTS];
+static bool g_blankBefore[AUDIO_FRAME_MAX_POINTS];
 static size_t g_audioPtCount = 0;
+static bool g_nextPointStartsBlanked = true;
 
 static inline void frameClear() {
   g_audioPtCount = 0;
+  g_nextPointStartsBlanked = true;
 }
 
 static inline void framePush(uint16_t x, uint16_t y) {
   if (g_audioPtCount < AUDIO_FRAME_MAX_POINTS) {
-    g_audioPts[g_audioPtCount++] = { x, y };
+    g_audioPts[g_audioPtCount] = { x, y };
+    g_blankBefore[g_audioPtCount] = g_nextPointStartsBlanked;
+    g_nextPointStartsBlanked = false;
+    g_audioPtCount++;
   }
+}
+
+static inline void frameMoveToNextPrimitive() {
+  g_nextPointStartsBlanked = true;
 }
 
 // =====================================================
@@ -69,15 +79,10 @@ static float g_phaseD = 0.0f;
 // =====================================================
 
 static uint32_t g_lastAudioUpdateMs = 0;
-
-// Option A from the earlier discussion:
-// Define the audio synthesis/filter reference rate from frame generation cadence,
-// not from replay rate. That keeps "Hz" meaningful for the generated signal.
 static constexpr float AUDIO_SYNTH_SAMPLE_RATE =
     (1000.0f * static_cast<float>(AUDIO_FRAME_MAX_POINTS)) /
     static_cast<float>(AUDIO_FRAME_UPDATE_MS);
 
-// Use midpoint of empirically clean region for maximum clean amplitude.
 static constexpr float AUDIO_CENTER_CODE_F = 0.5f * (DRAW_MIN_CODE + DRAW_MAX_CODE);
 static constexpr float AUDIO_HALF_SPAN_F =
     0.45f * (DRAW_MAX_CODE - DRAW_MIN_CODE);
@@ -128,7 +133,6 @@ static void updateFilterCoefficients() {
 
   const float dt = 1.0f / AUDIO_SYNTH_SAMPLE_RATE;
 
-  // LPF: alpha = dt / (RC + dt), RC = 1/(2*pi*fc)
   {
     const float rc = 1.0f / (2.0f * PI * g_lpfHz);
     const float alpha = dt / (rc + dt);
@@ -136,7 +140,6 @@ static void updateFilterCoefficients() {
     g_lpfR.alpha = alpha;
   }
 
-  // HPF: alpha = RC / (RC + dt)
   {
     const float rc = 1.0f / (2.0f * PI * g_hpfHz);
     const float alpha = rc / (rc + dt);
@@ -240,10 +243,13 @@ static void buildAudioFrame() {
   frameClear();
 
   if (fabsf(g_lpfHz - g_hpfHz) < 1.0f) {
+    frameMoveToNextPrimitive();
     framePush(DAC_CENTER_CODE, DAC_CENTER_CODE);
-    drawingSetAudioFrame(g_audioPts, g_audioPtCount);
+    drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
     return;
   }
+
+  frameMoveToNextPrimitive();
 
   for (size_t i = 0; i < AUDIO_FRAME_MAX_POINTS; ++i) {
     float xL = 0.0f;
@@ -268,7 +274,7 @@ static void buildAudioFrame() {
     );
   }
 
-  drawingSetAudioFrame(g_audioPts, g_audioPtCount);
+  drawingSetAudioFrame(g_audioPts, g_blankBefore, g_audioPtCount);
 }
 
 static void cyclePreset() {
@@ -291,10 +297,6 @@ static void cyclePreset() {
   resetFilterState();
   updateFilterCoefficients();
 }
-
-// =====================================================
-// Public API
-// =====================================================
 
 void audioBegin() {
   g_preset = AudioPreset::NOISY_COMPOSITE;
@@ -320,7 +322,7 @@ void audioUpdate(const InputSnapshot& in) {
 
   if (in.resetPressedEdge) {
     cyclePreset();
-    buildAudioFrame();  // immediate visual response on preset change
+    buildAudioFrame();
     g_lastAudioUpdateMs = millis();
     return;
   }

@@ -8,16 +8,26 @@
 // =====================================================
 
 static XYPoint g_frame[PONG_FRAME_MAX_POINTS];
+static bool g_blankBefore[PONG_FRAME_MAX_POINTS];
 static size_t g_frameCount = 0;
+static bool g_nextPointStartsBlanked = true;
 
 static inline void frameClear() {
   g_frameCount = 0;
+  g_nextPointStartsBlanked = true;
 }
 
 static inline void framePush(uint16_t x, uint16_t y) {
   if (g_frameCount < PONG_FRAME_MAX_POINTS) {
-    g_frame[g_frameCount++] = { x, y };
+    g_frame[g_frameCount] = { x, y };
+    g_blankBefore[g_frameCount] = g_nextPointStartsBlanked;
+    g_nextPointStartsBlanked = false;
+    g_frameCount++;
   }
+}
+
+static inline void frameMoveToNextPrimitive() {
+  g_nextPointStartsBlanked = true;
 }
 
 static void frameAddLine(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uint16_t spacing = 10) {
@@ -35,9 +45,16 @@ static void frameAddLine(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uin
 }
 
 static void frameAddRectOutline(uint16_t xMin, uint16_t yMin, uint16_t xMax, uint16_t yMax, uint16_t spacing = 10) {
+  frameMoveToNextPrimitive();
   frameAddLine(xMin, yMin, xMax, yMin, spacing);
+
+  frameMoveToNextPrimitive();
   frameAddLine(xMax, yMin, xMax, yMax, spacing);
+
+  frameMoveToNextPrimitive();
   frameAddLine(xMax, yMax, xMin, yMax, spacing);
+
+  frameMoveToNextPrimitive();
   frameAddLine(xMin, yMax, xMin, yMin, spacing);
 }
 
@@ -51,8 +68,10 @@ static void frameAddDigit(uint8_t digit, uint16_t x, uint16_t y, uint16_t w, uin
 
   const uint16_t x0 = x;
   const uint16_t x1 = x + w;
-  // In XY mode for this project, larger DAC Y code maps upward on screen.
-  // Build digits from a top anchor downward by subtracting height.
+
+  // Preserve your XY-orientation fix:
+  // larger DAC Y code maps upward on screen, so build digits downward
+  // from a top anchor by subtracting height.
   const uint16_t y0 = y;
   const uint16_t y1 = y - h / 2;
   const uint16_t y2 = y - h;
@@ -62,18 +81,21 @@ static void frameAddDigit(uint8_t digit, uint16_t x, uint16_t y, uint16_t w, uin
   const bool segC[10] = {1,1,0,1,1,1,1,1,1,1};
   const bool segD[10] = {1,0,1,1,0,1,1,0,1,1};
   const bool segE[10] = {1,0,1,0,0,0,1,0,1,0};
+
+  // Preserve your corrected segment-F table
   const bool segF[10] = {1,0,0,0,1,1,1,0,1,1};
+
   const bool segG[10] = {0,0,1,1,1,1,1,0,1,1};
 
   if (digit > 9) digit = 0;
 
-  if (segA[digit]) frameAddLine(x0, y0, x1, y0, 8);
-  if (segB[digit]) frameAddLine(x1, y0, x1, y1, 8);
-  if (segC[digit]) frameAddLine(x1, y1, x1, y2, 8);
-  if (segD[digit]) frameAddLine(x0, y2, x1, y2, 8);
-  if (segE[digit]) frameAddLine(x0, y1, x0, y2, 8);
-  if (segF[digit]) frameAddLine(x0, y0, x0, y1, 8);
-  if (segG[digit]) frameAddLine(x0, y1, x1, y1, 8);
+  if (segA[digit]) { frameMoveToNextPrimitive(); frameAddLine(x0, y0, x1, y0, 8); }
+  if (segB[digit]) { frameMoveToNextPrimitive(); frameAddLine(x1, y0, x1, y1, 8); }
+  if (segC[digit]) { frameMoveToNextPrimitive(); frameAddLine(x1, y1, x1, y2, 8); }
+  if (segD[digit]) { frameMoveToNextPrimitive(); frameAddLine(x0, y2, x1, y2, 8); }
+  if (segE[digit]) { frameMoveToNextPrimitive(); frameAddLine(x0, y1, x0, y2, 8); }
+  if (segF[digit]) { frameMoveToNextPrimitive(); frameAddLine(x0, y0, x0, y1, 8); }
+  if (segG[digit]) { frameMoveToNextPrimitive(); frameAddLine(x0, y1, x1, y1, 8); }
 }
 
 static void frameAddBall(uint16_t cx, uint16_t cy, uint16_t r) {
@@ -106,8 +128,7 @@ static uint8_t g_rightScore = 0;
 
 static uint32_t g_lastUpdateMs = 0;
 
-// The Pong layout was tuned for the earlier ~2320-code draw span.
-// Re-scale all spatial values when the usable analog window changes.
+// Preserve your layout-scaling model from the latest working code.
 static constexpr float PONG_REFERENCE_SPAN = 2320.0f;
 static constexpr float PONG_LAYOUT_SCALE =
   static_cast<float>(DRAW_MAX_CODE - DRAW_MIN_CODE) / PONG_REFERENCE_SPAN;
@@ -202,6 +223,7 @@ static void pongBuildFrame() {
   frameClear();
 
   // Left paddle
+  frameMoveToNextPrimitive();
   frameAddLine(
     LEFT_PADDLE_X,
     static_cast<uint16_t>(g_leftPaddleY - PADDLE_HALF_HEIGHT),
@@ -211,6 +233,7 @@ static void pongBuildFrame() {
   );
 
   // Right paddle
+  frameMoveToNextPrimitive();
   frameAddLine(
     RIGHT_PADDLE_X,
     static_cast<uint16_t>(g_rightPaddleY - PADDLE_HALF_HEIGHT),
@@ -232,7 +255,7 @@ static void pongBuildFrame() {
   frameAddDigit(g_leftScore,  centerX - gap - digitW, scoreY, digitW, digitH);
   frameAddDigit(g_rightScore, centerX + gap,          scoreY, digitW, digitH);
 
-  drawingSetPongFrame(g_frame, g_frameCount);
+  drawingSetPongFrame(g_frame, g_blankBefore, g_frameCount);
 }
 
 void pongBegin() {
@@ -243,18 +266,16 @@ void pongBegin() {
 }
 
 void pongOnEnter() {
-  // Rebuild visible frame when entering mode
   pongBuildFrame();
 }
 
 void pongUpdate(const InputSnapshot& in) {
-  // Paddle motion always active while in Pong mode
-  // Board wiring reports encoders crossed for Pong controls,
-  // so swap deltas to keep left knob -> left paddle and right knob -> right paddle.
+  // Preserve your board-specific encoder swap:
+  // right encoder drives left paddle, left encoder drives right paddle.
   int32_t leftDelta = in.rightEncoderDelta;
   int32_t rightDelta = in.leftEncoderDelta;
 
-  // In Pong, each paddle can be inverted independently.
+  // Preserve your independent Pong inversion flags.
   if (INVERT_PONG_LEFT_PADDLE) {
     leftDelta = -leftDelta;
   }

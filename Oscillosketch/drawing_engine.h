@@ -6,6 +6,11 @@ struct XYPoint {
   uint16_t y;
 };
 
+struct ReplayStep {
+  XYPoint point;
+  bool blankBefore;
+};
+
 enum class AppMode : uint8_t {
   ETCH = 0,
   SHAPE_DEMO = 1,
@@ -26,16 +31,17 @@ bool drawingIsPathFull();
 XYPoint drawingGetCursor();
 
 // Replay source
-XYPoint drawingGetNextReplayPoint();
+ReplayStep drawingGetNextReplayStep();
+XYPoint drawingGetNextReplayPoint();  // compatibility wrapper
 
 // Shape demo helpers
 void drawingBuildDemoShape();
 void drawingResetDemoIndex();
 
 // Pong frame helpers
-void drawingSetPongFrame(const XYPoint* pts, size_t count);
+void drawingSetPongFrame(const XYPoint* pts, const bool* blankBefore, size_t count);
 void drawingClearPongFrame();
 
 // Audio frame helpers
-void drawingSetAudioFrame(const XYPoint* pts, size_t count);
+void drawingSetAudioFrame(const XYPoint* pts, const bool* blankBefore, size_t count);
 void drawingClearAudioFrame();

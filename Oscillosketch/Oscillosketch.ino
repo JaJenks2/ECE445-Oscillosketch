@@ -10,13 +10,9 @@
 #include "drawing_engine.h"
 #include "input_manager.h"
 #include "app_modes.h"
+#include "zblank.h"
 
 static TaskHandle_t g_replayTaskHandle = nullptr;
-
-static void replayOnePoint() {
-  const XYPoint p = drawingGetNextReplayPoint();
-  dacWriteXY(p.x, p.y);
-}
 
 static void replayTask(void* arg) {
   (void)arg;
@@ -24,15 +20,29 @@ static void replayTask(void* arg) {
   uint64_t nextWakeUs = static_cast<uint64_t>(esp_timer_get_time());
   uint32_t pointCounter = 0;
 
-  // Exact-average pacing:
-  // Instead of using only REPLAY_PERIOD_US (which truncates to 9 us at 110 kHz),
-  // accumulate the remainder so we alternate 9 us / 10 us as needed.
   const uint32_t periodWholeUs = 1000000UL / REPLAY_RATE_HZ;
   const uint32_t periodRemainder = 1000000UL % REPLAY_RATE_HZ;
   uint32_t fracAccum = 0;
 
+  uint8_t blankCountdown = 0;
+
   for (;;) {
-    replayOnePoint();
+    const ReplayStep step = drawingGetNextReplayStep();
+
+    if (ENABLE_ZBLANK) {
+      if (step.blankBefore) {
+        blankCountdown = ZBLANK_STRETCH_POINTS;
+      }
+
+      if (blankCountdown > 0) {
+        zblankBlank();
+        blankCountdown--;
+      } else {
+        zblankVisible();
+      }
+    }
+
+    dacWriteXY(step.point.x, step.point.y);
 
     nextWakeUs += periodWholeUs;
     fracAccum += periodRemainder;
@@ -49,7 +59,6 @@ static void replayTask(void* arg) {
     } else if (remainingUs > 0) {
       delayMicroseconds(static_cast<uint32_t>(remainingUs));
     } else {
-      // If we fall behind, resync to current time but preserve fractional accumulator.
       nextWakeUs = static_cast<uint64_t>(nowUs);
     }
 
@@ -83,10 +92,12 @@ static void startReplayEngine() {
 
 void setup() {
   dacBegin();
+  zblankBegin();
   drawingBegin();
   inputBegin();
   appModesBegin();
 
+  zblankVisible();
   dacWriteCentered();
   delay(10);
 

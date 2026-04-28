@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static portMUX_TYPE g_etchMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
 
 // =====================================
 // Etch path storage
@@ -12,6 +12,8 @@ static portMUX_TYPE g_etchMux = portMUX_INITIALIZER_UNLOCKED;
 static XYPoint g_path[MAX_PATH_POINTS];
 static volatile size_t g_pathCount = 0;
 static volatile size_t g_replayIndex = 0;
+
+// Current cursor
 static volatile uint16_t g_cursorX = DAC_CENTER_CODE;
 static volatile uint16_t g_cursorY = DAC_CENTER_CODE;
 
@@ -24,21 +26,22 @@ static volatile AppMode g_mode = AppMode::ETCH;
 static XYPoint g_demoCircle[DEMO_POINT_COUNT];
 static XYPoint g_demoSquare[DEMO_POINT_COUNT];
 static volatile size_t g_demoIndex = 0;
+static volatile bool g_demoShowSquareState = false;
 
 // =====================================
-// Pong frame storage (double-buffered)
+// Pong frame storage
 // =====================================
-static XYPoint g_pongFrame[2][PONG_FRAME_MAX_POINTS];
-static volatile size_t g_pongFrameCount[2] = {0, 0};
-static volatile uint8_t g_pongActiveBuf = 0;
+static XYPoint g_pongFrame[PONG_FRAME_MAX_POINTS];
+static bool g_pongBlankBefore[PONG_FRAME_MAX_POINTS];
+static volatile size_t g_pongFrameCount = 0;
 static volatile size_t g_pongReplayIndex = 0;
 
 // =====================================
-// Audio frame storage (double-buffered)
+// Audio frame storage
 // =====================================
-static XYPoint g_audioFrame[2][AUDIO_FRAME_MAX_POINTS];
-static volatile size_t g_audioFrameCount[2] = {0, 0};
-static volatile uint8_t g_audioActiveBuf = 0;
+static XYPoint g_audioFrame[AUDIO_FRAME_MAX_POINTS];
+static bool g_audioBlankBefore[AUDIO_FRAME_MAX_POINTS];
+static volatile size_t g_audioFrameCount = 0;
 static volatile size_t g_audioReplayIndex = 0;
 
 static inline uint16_t clampCode(int32_t v) {
@@ -50,37 +53,35 @@ static inline uint16_t clampCode(int32_t v) {
 static void pathClearAndCenterLocked() {
   g_cursorX = DAC_CENTER_CODE;
   g_cursorY = DAC_CENTER_CODE;
-  g_path[0] = { DAC_CENTER_CODE, DAC_CENTER_CODE };
   g_pathCount = 1;
   g_replayIndex = 0;
+  g_path[0] = { DAC_CENTER_CODE, DAC_CENTER_CODE };
 }
 
 void drawingBegin() {
-  portENTER_CRITICAL(&g_etchMux);
+  portENTER_CRITICAL(&g_stateMux);
   pathClearAndCenterLocked();
-  portEXIT_CRITICAL(&g_etchMux);
-
   g_mode = AppMode::ETCH;
   g_demoIndex = 0;
-  g_pongFrameCount[0] = g_pongFrameCount[1] = 0;
-  g_pongActiveBuf = 0;
+  g_demoShowSquareState = false;
+  g_pongFrameCount = 0;
   g_pongReplayIndex = 0;
-  g_audioFrameCount[0] = g_audioFrameCount[1] = 0;
-  g_audioActiveBuf = 0;
+  g_audioFrameCount = 0;
   g_audioReplayIndex = 0;
+  portEXIT_CRITICAL(&g_stateMux);
 
   drawingBuildDemoShape();
 }
 
 void drawingResetToCenter() {
-  portENTER_CRITICAL(&g_etchMux);
+  portENTER_CRITICAL(&g_stateMux);
   pathClearAndCenterLocked();
-  portEXIT_CRITICAL(&g_etchMux);
-
   g_demoIndex = 0;
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
 void drawingSetMode(AppMode mode) {
+  portENTER_CRITICAL(&g_stateMux);
   g_mode = mode;
 
   switch (mode) {
@@ -97,24 +98,35 @@ void drawingSetMode(AppMode mode) {
       g_audioReplayIndex = 0;
       break;
   }
+
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
 AppMode drawingGetMode() {
-  return g_mode;
+  portENTER_CRITICAL(&g_stateMux);
+  AppMode m = g_mode;
+  portEXIT_CRITICAL(&g_stateMux);
+  return m;
 }
 
 size_t drawingGetPathCount() {
-  return g_pathCount;
+  portENTER_CRITICAL(&g_stateMux);
+  size_t n = g_pathCount;
+  portEXIT_CRITICAL(&g_stateMux);
+  return n;
 }
 
 bool drawingIsPathFull() {
-  return g_pathCount >= MAX_PATH_POINTS;
+  portENTER_CRITICAL(&g_stateMux);
+  bool full = (g_pathCount >= MAX_PATH_POINTS);
+  portEXIT_CRITICAL(&g_stateMux);
+  return full;
 }
 
 XYPoint drawingGetCursor() {
-  XYPoint p;
-  p.x = g_cursorX;
-  p.y = g_cursorY;
+  portENTER_CRITICAL(&g_stateMux);
+  XYPoint p { g_cursorX, g_cursorY };
+  portEXIT_CRITICAL(&g_stateMux);
   return p;
 }
 
@@ -123,7 +135,8 @@ bool drawingAppendMoveClamped(int32_t dxCodes, int32_t dyCodes) {
     return false;
   }
 
-  // Snapshot current cursor without holding the lock long-term.
+  portENTER_CRITICAL(&g_stateMux);
+
   const uint16_t startX = g_cursorX;
   const uint16_t startY = g_cursorY;
 
@@ -141,6 +154,7 @@ bool drawingAppendMoveClamped(int32_t dxCodes, int32_t dyCodes) {
   }
 
   if (adjDx == 0 && adjDy == 0) {
+    portEXIT_CRITICAL(&g_stateMux);
     return false;
   }
 
@@ -148,6 +162,7 @@ bool drawingAppendMoveClamped(int32_t dxCodes, int32_t dyCodes) {
   const uint16_t endY = clampCode(static_cast<int32_t>(startY) + adjDy);
 
   if (endX == startX && endY == startY) {
+    portEXIT_CRITICAL(&g_stateMux);
     return false;
   }
 
@@ -158,62 +173,41 @@ bool drawingAppendMoveClamped(int32_t dxCodes, int32_t dyCodes) {
   int32_t steps = maxAbsDelta / INTERP_CODES_PER_POINT;
   if (steps < 1) steps = 1;
 
-  // Stage interpolated points locally first so replay is not blocked while we build them.
-  constexpr size_t MAX_STAGED_APPEND_POINTS =
-      ((DAC_MAX_CODE - DAC_MIN_CODE) / INTERP_CODES_PER_POINT) + 8;
-  XYPoint staged[MAX_STAGED_APPEND_POINTS];
-  size_t stagedCount = 0;
+  if (g_pathCount + static_cast<size_t>(steps) >= MAX_PATH_POINTS) {
+    portEXIT_CRITICAL(&g_stateMux);
+    return false;
+  }
 
   const int32_t x0 = static_cast<int32_t>(startX);
   const int32_t y0 = static_cast<int32_t>(startY);
-
-  XYPoint lastPoint = { startX, startY };
 
   for (int32_t i = 1; i <= steps; ++i) {
     const int32_t px = x0 + (segDx * i) / steps;
     const int32_t py = y0 + (segDy * i) / steps;
 
-    XYPoint p = {
-      static_cast<uint16_t>(px),
-      static_cast<uint16_t>(py)
-    };
-
-    if (p.x == lastPoint.x && p.y == lastPoint.y) {
+    const XYPoint last = g_path[g_pathCount - 1];
+    if (last.x == static_cast<uint16_t>(px) && last.y == static_cast<uint16_t>(py)) {
       continue;
     }
 
-    if (stagedCount >= MAX_STAGED_APPEND_POINTS) {
-      break;
-    }
-
-    staged[stagedCount++] = p;
-    lastPoint = p;
+    g_path[g_pathCount++] = {
+      static_cast<uint16_t>(px),
+      static_cast<uint16_t>(py)
+    };
   }
 
-  if (stagedCount == 0) {
-    return false;
-  }
-
-  // Brief critical section only for the append and cursor/count commit.
-  portENTER_CRITICAL(&g_etchMux);
-
-  if (g_pathCount + stagedCount >= MAX_PATH_POINTS) {
-    portEXIT_CRITICAL(&g_etchMux);
-    return false;
-  }
-
-  memcpy(&g_path[g_pathCount], staged, stagedCount * sizeof(XYPoint));
-  g_pathCount += stagedCount;
   g_cursorX = endX;
   g_cursorY = endY;
 
-  portEXIT_CRITICAL(&g_etchMux);
+  portEXIT_CRITICAL(&g_stateMux);
   return true;
 }
 
 void drawingBuildDemoShape() {
   const float center = static_cast<float>(DAC_CENTER_CODE);
   const float radius = 600.0f;
+
+  portENTER_CRITICAL(&g_stateMux);
 
   for (size_t i = 0; i < DEMO_POINT_COUNT; ++i) {
     const float t = (2.0f * PI * static_cast<float>(i)) / static_cast<float>(DEMO_POINT_COUNT);
@@ -247,137 +241,144 @@ void drawingBuildDemoShape() {
   }
 
   g_demoIndex = 0;
+  g_demoShowSquareState = false;
+
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
 void drawingResetDemoIndex() {
+  portENTER_CRITICAL(&g_stateMux);
   g_demoIndex = 0;
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
-void drawingSetPongFrame(const XYPoint* pts, size_t count) {
-  if (pts == nullptr) return;
+void drawingSetPongFrame(const XYPoint* pts, const bool* blankBefore, size_t count) {
+  if (pts == nullptr || blankBefore == nullptr) return;
   if (count > PONG_FRAME_MAX_POINTS) count = PONG_FRAME_MAX_POINTS;
 
-  const uint8_t currentActive = g_pongActiveBuf;
-  const uint8_t writeBuf = currentActive ^ 1U;
-
-  memcpy(g_pongFrame[writeBuf], pts, count * sizeof(XYPoint));
-
-  g_pongFrameCount[writeBuf] = count;
-
-  // Atomic-ish front/back swap. Very short critical section.
-  portENTER_CRITICAL(&g_etchMux);
-  g_pongActiveBuf = writeBuf;
-  if (g_pongReplayIndex >= count) {
+  portENTER_CRITICAL(&g_stateMux);
+  memcpy(g_pongFrame, pts, count * sizeof(XYPoint));
+  memcpy(g_pongBlankBefore, blankBefore, count * sizeof(bool));
+  g_pongFrameCount = count;
+  if (g_pongReplayIndex >= g_pongFrameCount) {
     g_pongReplayIndex = 0;
   }
-  portEXIT_CRITICAL(&g_etchMux);
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
 void drawingClearPongFrame() {
-  g_pongFrame[1][0] = { DAC_CENTER_CODE, DAC_CENTER_CODE };
-  g_pongFrameCount[1] = 1;
-
-  portENTER_CRITICAL(&g_etchMux);
-  g_pongActiveBuf = 1;
+  portENTER_CRITICAL(&g_stateMux);
+  g_pongFrameCount = 1;
   g_pongReplayIndex = 0;
-  portEXIT_CRITICAL(&g_etchMux);
+  g_pongFrame[0] = { DAC_CENTER_CODE, DAC_CENTER_CODE };
+  g_pongBlankBefore[0] = true;
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
-void drawingSetAudioFrame(const XYPoint* pts, size_t count) {
-  if (pts == nullptr) return;
+void drawingSetAudioFrame(const XYPoint* pts, const bool* blankBefore, size_t count) {
+  if (pts == nullptr || blankBefore == nullptr) return;
   if (count > AUDIO_FRAME_MAX_POINTS) count = AUDIO_FRAME_MAX_POINTS;
 
-  const uint8_t currentActive = g_audioActiveBuf;
-  const uint8_t writeBuf = currentActive ^ 1U;
-
-  memcpy(g_audioFrame[writeBuf], pts, count * sizeof(XYPoint));
-
-  g_audioFrameCount[writeBuf] = count;
-
-  portENTER_CRITICAL(&g_etchMux);
-  g_audioActiveBuf = writeBuf;
-  if (g_audioReplayIndex >= count) {
+  portENTER_CRITICAL(&g_stateMux);
+  memcpy(g_audioFrame, pts, count * sizeof(XYPoint));
+  memcpy(g_audioBlankBefore, blankBefore, count * sizeof(bool));
+  g_audioFrameCount = count;
+  if (g_audioReplayIndex >= g_audioFrameCount) {
     g_audioReplayIndex = 0;
   }
-  portEXIT_CRITICAL(&g_etchMux);
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
 void drawingClearAudioFrame() {
-  g_audioFrame[1][0] = { DAC_CENTER_CODE, DAC_CENTER_CODE };
-  g_audioFrameCount[1] = 1;
-
-  portENTER_CRITICAL(&g_etchMux);
-  g_audioActiveBuf = 1;
+  portENTER_CRITICAL(&g_stateMux);
+  g_audioFrameCount = 1;
   g_audioReplayIndex = 0;
-  portEXIT_CRITICAL(&g_etchMux);
+  g_audioFrame[0] = { DAC_CENTER_CODE, DAC_CENTER_CODE };
+  g_audioBlankBefore[0] = true;
+  portEXIT_CRITICAL(&g_stateMux);
 }
 
-XYPoint drawingGetNextReplayPoint() {
-  XYPoint out { DAC_CENTER_CODE, DAC_CENTER_CODE };
-  const AppMode mode = g_mode;
+ReplayStep drawingGetNextReplayStep() {
+  ReplayStep step;
+  step.point = { DAC_CENTER_CODE, DAC_CENTER_CODE };
+  step.blankBefore = false;
 
-  switch (mode) {
+  const bool showSquare = ((millis() / 2000UL) % 2UL) != 0UL;
+
+  portENTER_CRITICAL(&g_stateMux);
+
+  switch (g_mode) {
     case AppMode::ETCH: {
-      size_t count = g_pathCount;
-      size_t idx = g_replayIndex;
-
-      if (count == 0) {
-        out = { DAC_CENTER_CODE, DAC_CENTER_CODE };
+      if (g_pathCount == 0) {
+        step.point = { DAC_CENTER_CODE, DAC_CENTER_CODE };
       } else {
-        if (idx >= count) {
-          idx = 0;
+        if (g_replayIndex >= g_pathCount) {
+          g_replayIndex = 0;
         }
-        out = g_path[idx];
-        g_replayIndex = idx + 1;
+
+        if (g_pathCount > 1 && g_replayIndex == 0) {
+          step.blankBefore = true;
+        }
+
+        step.point = g_path[g_replayIndex++];
       }
       break;
     }
 
     case AppMode::SHAPE_DEMO: {
-      const bool showSquare = ((millis() / 2000UL) % 2UL) != 0UL;
-      size_t idx = g_demoIndex;
-      if (idx >= DEMO_POINT_COUNT) {
-        idx = 0;
+      if (showSquare != g_demoShowSquareState) {
+        g_demoShowSquareState = showSquare;
+        g_demoIndex = 0;
+        if (DEMO_POINT_COUNT > 1) {
+          step.blankBefore = true;
+        }
       }
-      out = showSquare ? g_demoSquare[idx] : g_demoCircle[idx];
-      g_demoIndex = idx + 1;
+
+      if (g_demoIndex >= DEMO_POINT_COUNT) {
+        g_demoIndex = 0;
+      }
+
+      if (DEMO_POINT_COUNT > 1 && g_demoIndex == 0) {
+        step.blankBefore = true;
+      }
+
+      step.point = showSquare ? g_demoSquare[g_demoIndex++] : g_demoCircle[g_demoIndex++];
       break;
     }
 
     case AppMode::PONG: {
-      const uint8_t activeBuf = g_pongActiveBuf;
-      const size_t count = g_pongFrameCount[activeBuf];
-      size_t idx = g_pongReplayIndex;
-
-      if (count == 0) {
-        out = { DAC_CENTER_CODE, DAC_CENTER_CODE };
+      if (g_pongFrameCount == 0) {
+        step.point = { DAC_CENTER_CODE, DAC_CENTER_CODE };
       } else {
-        if (idx >= count) {
-          idx = 0;
+        if (g_pongReplayIndex >= g_pongFrameCount) {
+          g_pongReplayIndex = 0;
         }
-        out = g_pongFrame[activeBuf][idx];
-        g_pongReplayIndex = idx + 1;
+
+        step.blankBefore = g_pongBlankBefore[g_pongReplayIndex];
+        step.point = g_pongFrame[g_pongReplayIndex++];
       }
       break;
     }
 
     case AppMode::USB_STREAM: {
-      const uint8_t activeBuf = g_audioActiveBuf;
-      const size_t count = g_audioFrameCount[activeBuf];
-      size_t idx = g_audioReplayIndex;
-
-      if (count == 0) {
-        out = { DAC_CENTER_CODE, DAC_CENTER_CODE };
+      if (g_audioFrameCount == 0) {
+        step.point = { DAC_CENTER_CODE, DAC_CENTER_CODE };
       } else {
-        if (idx >= count) {
-          idx = 0;
+        if (g_audioReplayIndex >= g_audioFrameCount) {
+          g_audioReplayIndex = 0;
         }
-        out = g_audioFrame[activeBuf][idx];
-        g_audioReplayIndex = idx + 1;
+
+        step.blankBefore = g_audioBlankBefore[g_audioReplayIndex];
+        step.point = g_audioFrame[g_audioReplayIndex++];
       }
       break;
     }
   }
 
-  return out;
+  portEXIT_CRITICAL(&g_stateMux);
+  return step;
+}
+
+XYPoint drawingGetNextReplayPoint() {
+  return drawingGetNextReplayStep().point;
 }
