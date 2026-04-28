@@ -84,7 +84,7 @@ constexpr uint32_t AUDIO_STREAM_ACTIVE_TIMEOUT_MS = 2000;
 
 // Playback gating / rebuffer thresholds.
 constexpr size_t AUDIO_LIVE_START_FILL_FRAMES    = 8192;
-constexpr size_t AUDIO_LIVE_REBUFFER_LOW_FRAMES  = 2048;
+constexpr size_t AUDIO_LIVE_REBUFFER_LOW_FRAMES  = 1024;
 
 // Audio mode uses tighter DAC bounds because laptop-powered operation
 // has shown the bad edge behavior at the wider charger-powered limits.

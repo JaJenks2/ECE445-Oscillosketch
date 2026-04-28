@@ -23,15 +23,28 @@ AUDIO_SAMPLE_RATE = 16000
 AUDIO_PACKET_FRAMES = 256
 AUDIO_SERIAL_BAUD = 2_000_000
 
-# ESP firmware thresholds should match config.h.
+# Must match firmware-side thresholds closely enough for stable playback.
 PREFILL_TARGET_FRAMES = 8192
-STREAM_TARGET_FILL_FRAMES = 10000
+STREAM_TARGET_FILL_FRAMES = 9000
 STREAM_HIGH_FILL_FRAMES = 14000
-STREAM_LOW_FILL_FRAMES = 4096
+STREAM_CRITICAL_LOW_FRAMES = 4096
 
 START_ACK_TIMEOUT_S = 2.0
 STOP_ACK_TIMEOUT_S = 1.0
 SUMMARY_PERIOD_S = 1.0
+
+# v5 key behavior: do not blast packets just because local estimated fill is low.
+# The ESP32 USB/CDC RX side was showing CRC/sequence failures under bursty writes.
+# Keep bounded write rates and use receiver-reported fill as the source of truth.
+PACKET_DURATION_S = AUDIO_PACKET_FRAMES / AUDIO_SAMPLE_RATE  # 16 ms at 16 kHz/256 frames
+# v7 tuning: do not overrun the USB CDC / UART path. At 2 Mbaud, a 1038-byte
+# packet is already about 5.2 ms on the wire before USB/driver overhead. The
+# previous 6 ms refill cadence was too aggressive and produced many CRC errors.
+PREFILL_PACKET_INTERVAL_S = 0.012       # safe initial fill, still faster than realtime
+REFILL_PACKET_INTERVAL_S = 0.012        # bounded catch-up without blasting packets
+NORMAL_PACKET_INTERVAL_S = PACKET_DURATION_S
+HIGH_FILL_SLEEP_S = 0.004
+WRITE_FLUSH_EACH_PACKET = True
 
 
 class WindowsHighResTimer:
@@ -44,8 +57,7 @@ class WindowsHighResTimer:
             try:
                 winmm = ctypes.WinDLL("winmm")
                 res = winmm.timeBeginPeriod(self.period_ms)
-                if res == 0:
-                    self.enabled = True
+                self.enabled = (res == 0)
             except Exception:
                 self.enabled = False
         return self
@@ -53,8 +65,7 @@ class WindowsHighResTimer:
     def __exit__(self, exc_type, exc, tb):
         if self.enabled and sys.platform.startswith("win"):
             try:
-                winmm = ctypes.WinDLL("winmm")
-                winmm.timeEndPeriod(self.period_ms)
+                ctypes.WinDLL("winmm").timeEndPeriod(self.period_ms)
             except Exception:
                 pass
 
@@ -95,7 +106,6 @@ def choose_audio_file(explicit_path):
     try:
         import tkinter as tk
         from tkinter import filedialog
-
         root = tk.Tk()
         root.withdraw()
         filename = filedialog.askopenfilename(
@@ -106,11 +116,9 @@ def choose_audio_file(explicit_path):
             ],
         )
         root.destroy()
-
         if not filename:
             raise RuntimeError("No file selected.")
         return Path(filename).expanduser().resolve()
-
     except Exception as e:
         raise RuntimeError(
             "No file path provided and file picker failed. Pass the file path with --file."
@@ -122,7 +130,6 @@ def load_and_convert_audio(path):
     seg = seg.set_frame_rate(AUDIO_SAMPLE_RATE)
     seg = seg.set_channels(2)
     seg = seg.set_sample_width(2)
-
     raw = seg.raw_data
     if len(raw) % 4 != 0:
         raw += b"\x00" * (4 - (len(raw) % 4))
@@ -133,13 +140,11 @@ def iter_packets(raw_pcm):
     bytes_per_frame = 4
     total_frames = len(raw_pcm) // bytes_per_frame
     idx = 0
-
     while idx < total_frames:
         frame_count = min(AUDIO_PACKET_FRAMES, total_frames - idx)
         start = idx * bytes_per_frame
         end = start + frame_count * bytes_per_frame
-        payload = raw_pcm[start:end]
-        yield frame_count, payload
+        yield frame_count, raw_pcm[start:end]
         idx += frame_count
 
 
@@ -175,38 +180,35 @@ def open_serial_for_esp32_s3_usb(port):
     ser.write_timeout = 2
     ser.dsrdtr = False
     ser.rtscts = False
-
     ser.open()
-
     try:
         ser.setDTR(True)
         ser.setRTS(False)
     except Exception:
         pass
-
     return ser
 
 
 def write_full_packet(ser, pkt):
     try:
         written = ser.write(pkt)
-    except SerialTimeoutException:
-        raise RuntimeError("Serial write timed out while sending a packet.")
+        if WRITE_FLUSH_EACH_PACKET:
+            ser.flush()
+    except SerialTimeoutException as exc:
+        raise RuntimeError("Serial write timed out while sending a packet.") from exc
 
     if written != len(pkt):
         raise RuntimeError(f"Short write while sending packet: {written} of {len(pkt)} bytes")
 
 
-def precise_wait_until(target_time, ser=None, streamer=None):
+def precise_wait_until(target_time, ser=None, ctrl=None):
     while True:
         now = time.perf_counter()
         remaining = target_time - now
         if remaining <= 0:
             return
-
-        if ser is not None and streamer is not None:
-            streamer.drain_status(ser)
-
+        if ser is not None and ctrl is not None:
+            ctrl.drain_status(ser)
         if remaining > 0.003:
             time.sleep(remaining - 0.001)
         elif remaining > 0.0005:
@@ -219,7 +221,6 @@ def parse_key_value_line(line):
     parts = line.strip().split()
     if not parts:
         return None
-
     kind = parts[0]
     if kind not in {"ACK", "STAT", "ERR"}:
         return None
@@ -241,7 +242,6 @@ def parse_key_value_line(line):
             out[k] = int(v, 0)
         except ValueError:
             out[k] = v
-
     return out
 
 
@@ -250,69 +250,67 @@ class StreamController:
         self.rx_text_buf = ""
         self.last_status = None
         self.last_ack = None
-        self.est_fill = 0.0
-        self.est_time = time.perf_counter()
+        self.last_fill = 0.0
+        self.fill_time = time.perf_counter()
         self.total_packets_written = 0
         self.total_frames_written = 0
-        self.write_errors = 0
 
-    def decay_estimate(self):
+    def receiver_fill(self):
+        # Conservative estimate: only decay from the last ESP-reported fill.
+        # Do not add locally sent frames here; packets that fail CRC must not
+        # make the host believe the receiver is filled.
         now = time.perf_counter()
-        elapsed = now - self.est_time
-        if elapsed > 0:
-            self.est_fill = max(0.0, self.est_fill - elapsed * AUDIO_SAMPLE_RATE)
-            self.est_time = now
-
-    def note_sent_frames(self, frames):
-        self.decay_estimate()
-        self.est_fill += frames
-        self.total_frames_written += frames
+        elapsed = max(0.0, now - self.fill_time)
+        return max(0.0, self.last_fill - elapsed * AUDIO_SAMPLE_RATE)
 
     def note_status(self, stat):
         if "fill" in stat:
-            self.est_fill = float(stat["fill"])
-            self.est_time = time.perf_counter()
+            self.last_fill = float(stat["fill"])
+            self.fill_time = time.perf_counter()
         self.last_status = stat
+
+    def note_ack(self, ack):
+        self.last_ack = ack
+        if "fill" in ack:
+            self.last_fill = float(ack["fill"])
+            self.fill_time = time.perf_counter()
+
+    def note_sent_frames(self, frames):
+        # Intentionally not added to receiver_fill(). The ESP status is the
+        # source of truth because CRC failures and sequence loss are possible.
+        self.total_frames_written += frames
 
     def drain_status(self, ser, print_unknown=False):
         try:
             waiting = ser.in_waiting
         except Exception:
             waiting = 0
-
         if waiting <= 0:
-            self.decay_estimate()
             return []
 
         data = ser.read(waiting)
         parsed = []
-        if data:
-            self.rx_text_buf += data.decode("utf-8", errors="ignore")
+        if not data:
+            return parsed
 
-            while "\n" in self.rx_text_buf:
-                line, self.rx_text_buf = self.rx_text_buf.split("\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-
-                msg = parse_key_value_line(line)
-                if msg is None:
-                    if print_unknown:
-                        print(f"[ESP] {line}")
-                    continue
-
-                parsed.append(msg)
-                if msg["line_type"] == "STAT":
-                    self.note_status(msg)
-                elif msg["line_type"] == "ACK":
-                    self.last_ack = msg
-                    if "fill" in msg:
-                        self.est_fill = float(msg["fill"])
-                        self.est_time = time.perf_counter()
-                elif msg["line_type"] == "ERR":
+        self.rx_text_buf += data.decode("utf-8", errors="ignore")
+        while "\n" in self.rx_text_buf:
+            line, self.rx_text_buf = self.rx_text_buf.split("\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            msg = parse_key_value_line(line)
+            if msg is None:
+                if print_unknown:
                     print(f"[ESP] {line}")
-
-        self.decay_estimate()
+                continue
+            parsed.append(msg)
+            if msg["line_type"] == "STAT":
+                self.note_status(msg)
+            elif msg["line_type"] == "ACK":
+                self.note_ack(msg)
+            elif msg["line_type"] == "ERR":
+                print(f"[ESP] {line}")
         return parsed
 
 
@@ -320,24 +318,15 @@ def wait_for_start_ack(ser, ctrl, start_seq):
     pkt = build_packet(PKT_TYPE_START, start_seq, 0, build_start_payload())
     deadline = time.perf_counter() + START_ACK_TIMEOUT_S
     next_send = 0.0
-
     while time.perf_counter() < deadline:
         now = time.perf_counter()
         if now >= next_send:
             write_full_packet(ser, pkt)
             next_send = now + 0.100
-
-        msgs = ctrl.drain_status(ser)
-        for msg in msgs:
-            if (
-                msg["line_type"] == "ACK"
-                and msg.get("ack_kind") == "START"
-                and msg.get("seq") == start_seq
-            ):
+        for msg in ctrl.drain_status(ser):
+            if msg["line_type"] == "ACK" and msg.get("ack_kind") == "START" and msg.get("seq") == start_seq:
                 return msg
-
         time.sleep(0.001)
-
     raise RuntimeError("No START ACK from ESP. Confirm the board is powered and the correct COM port is selected.")
 
 
@@ -345,24 +334,15 @@ def wait_for_stop_ack(ser, ctrl, stop_seq):
     pkt = build_packet(PKT_TYPE_STOP, stop_seq, 0, b"")
     deadline = time.perf_counter() + STOP_ACK_TIMEOUT_S
     next_send = 0.0
-
     while time.perf_counter() < deadline:
         now = time.perf_counter()
         if now >= next_send:
             write_full_packet(ser, pkt)
             next_send = now + 0.100
-
-        msgs = ctrl.drain_status(ser)
-        for msg in msgs:
-            if (
-                msg["line_type"] == "ACK"
-                and msg.get("ack_kind") == "STOP"
-                and msg.get("seq") == stop_seq
-            ):
+        for msg in ctrl.drain_status(ser):
+            if msg["line_type"] == "ACK" and msg.get("ack_kind") == "STOP" and msg.get("seq") == stop_seq:
                 return msg
-
         time.sleep(0.001)
-
     return None
 
 
@@ -374,15 +354,15 @@ def send_data_packet(ser, ctrl, seq, frame_count, payload):
 
 
 def print_summary(ctrl, packets_sent, done=False):
-    ctrl.decay_estimate()
     stat = ctrl.last_status or {}
     prefix = "[HOST DONE]" if done else "[HOST]"
+    fill_est = ctrl.receiver_fill()
     print(
-        f"{prefix} sent={packets_sent} est_fill={ctrl.est_fill:.0f} "
+        f"{prefix} sent={packets_sent} est_fill={fill_est:.0f} "
         f"fill={stat.get('fill', '?')} max={stat.get('max', '?')} "
         f"acc={stat.get('acc', '?')} miss={stat.get('miss', '?')} "
         f"crc={stat.get('crc', '?')} seqerr={stat.get('seqerr', '?')} "
-        f"over={stat.get('over', '?')} und={stat.get('und', '?')}"
+        f"over={stat.get('over', '?')} und={stat.get('und', '?')} conceal={stat.get('conceal', '?')}"
     )
 
 
@@ -397,12 +377,10 @@ def stream_loop(port, raw_pcm, loop_file=False):
             print("DTR asserted, RTS low.")
             print("High-resolution timer requested.")
             time.sleep(0.25)
-
             ser.reset_input_buffer()
             ser.reset_output_buffer()
 
             ctrl = StreamController()
-
             start_seq = 0
             ack = wait_for_start_ack(ser, ctrl, start_seq)
             print(
@@ -415,20 +393,26 @@ def stream_loop(port, raw_pcm, loop_file=False):
             loop_count = 0
             packets_sent = 0
             last_summary_time = time.perf_counter()
-            next_realtime_send = time.perf_counter()
+            next_send_time = time.perf_counter()
 
-            print(f"Prefilling to about {PREFILL_TARGET_FRAMES} frames...")
-            while ctrl.est_fill < PREFILL_TARGET_FRAMES and packet_index < len(packet_list):
+            print(f"Prefilling receiver to {PREFILL_TARGET_FRAMES} actual frames...")
+            while ctrl.receiver_fill() < PREFILL_TARGET_FRAMES and packet_index < len(packet_list):
                 ctrl.drain_status(ser)
+                precise_wait_until(next_send_time, ser, ctrl)
                 frame_count, payload = packet_list[packet_index]
                 send_data_packet(ser, ctrl, seq, frame_count, payload)
                 packets_sent += 1
                 seq = (seq + 1) & 0xFFFF
                 packet_index += 1
+                next_send_time = time.perf_counter() + PREFILL_PACKET_INTERVAL_S
+                now = time.perf_counter()
+                if now - last_summary_time >= SUMMARY_PERIOD_S:
+                    print_summary(ctrl, packets_sent)
+                    last_summary_time = now
 
-            # Give the ESP a short chance to report the true receiver-side fill.
-            prefill_deadline = time.perf_counter() + 0.250
-            while time.perf_counter() < prefill_deadline:
+            # Wait briefly for the latest STAT so the printed fill is receiver-side truth.
+            settle_deadline = time.perf_counter() + 0.200
+            while time.perf_counter() < settle_deadline:
                 ctrl.drain_status(ser)
                 if ctrl.last_status and ctrl.last_status.get("fill", 0) >= PREFILL_TARGET_FRAMES:
                     break
@@ -436,11 +420,11 @@ def stream_loop(port, raw_pcm, loop_file=False):
 
             print_summary(ctrl, packets_sent)
             print("Streaming. Press Ctrl+C to stop.")
+            next_send_time = time.perf_counter()
 
             try:
                 while True:
                     ctrl.drain_status(ser)
-
                     if packet_index >= len(packet_list):
                         if loop_file:
                             packet_index = 0
@@ -449,30 +433,25 @@ def stream_loop(port, raw_pcm, loop_file=False):
                         else:
                             break
 
-                    ctrl.decay_estimate()
+                    fill = ctrl.receiver_fill()
                     now = time.perf_counter()
 
-                    if ctrl.est_fill >= STREAM_HIGH_FILL_FRAMES:
-                        time.sleep(0.002)
+                    if fill >= STREAM_HIGH_FILL_FRAMES:
+                        time.sleep(HIGH_FILL_SLEEP_S)
                         continue
 
-                    # If the receiver is below target, send immediately to refill.
-                    # If it is near target, fall back to real-time pacing.
-                    if ctrl.est_fill >= STREAM_TARGET_FILL_FRAMES:
-                        precise_wait_until(next_realtime_send, ser, ctrl)
+                    if fill < STREAM_TARGET_FILL_FRAMES:
+                        interval = REFILL_PACKET_INTERVAL_S
                     else:
-                        next_realtime_send = time.perf_counter()
+                        interval = NORMAL_PACKET_INTERVAL_S
 
+                    precise_wait_until(next_send_time, ser, ctrl)
                     frame_count, payload = packet_list[packet_index]
                     send_data_packet(ser, ctrl, seq, frame_count, payload)
                     packets_sent += 1
                     seq = (seq + 1) & 0xFFFF
                     packet_index += 1
-
-                    packet_duration = frame_count / AUDIO_SAMPLE_RATE
-                    next_realtime_send += packet_duration
-                    if next_realtime_send < time.perf_counter():
-                        next_realtime_send = time.perf_counter()
+                    next_send_time = time.perf_counter() + interval
 
                     now = time.perf_counter()
                     if now - last_summary_time >= SUMMARY_PERIOD_S:
@@ -483,15 +462,10 @@ def stream_loop(port, raw_pcm, loop_file=False):
                 print("\nStopping transport...")
             else:
                 print("\nAll packets sent; waiting for ESP playback buffer to drain...")
-
-                drain_deadline = time.perf_counter() + max(2.0, (ctrl.est_fill / AUDIO_SAMPLE_RATE) + 1.0)
+                drain_deadline = time.perf_counter() + max(2.0, (ctrl.receiver_fill() / AUDIO_SAMPLE_RATE) + 1.0)
                 while time.perf_counter() < drain_deadline:
                     ctrl.drain_status(ser)
-                    ctrl.decay_estimate()
-                    stat_fill = None
-                    if ctrl.last_status is not None:
-                        stat_fill = ctrl.last_status.get("fill")
-                    effective_fill = stat_fill if stat_fill is not None else ctrl.est_fill
+                    effective_fill = ctrl.receiver_fill()
                     if effective_fill <= AUDIO_PACKET_FRAMES:
                         break
                     time.sleep(0.005)
@@ -502,7 +476,6 @@ def stream_loop(port, raw_pcm, loop_file=False):
                 print(f"Transport STOP acked, fill={ack.get('fill')}")
             else:
                 print("STOP ACK not received; stream may already be closed.")
-
             ctrl.drain_status(ser)
             print_summary(ctrl, packets_sent, done=True)
             print("Stopped.")
@@ -520,14 +493,12 @@ def main():
 
     print(f"Loading: {audio_path}")
     raw_pcm = load_and_convert_audio(audio_path)
-
     total_frames = len(raw_pcm) // 4
     duration_s = total_frames / AUDIO_SAMPLE_RATE
     print(f"Converted to {AUDIO_SAMPLE_RATE} Hz stereo 16-bit PCM")
     print(f"Frames: {total_frames}")
     print(f"Duration: {duration_s:.2f} s")
     print(f"Packets: {math.ceil(total_frames / AUDIO_PACKET_FRAMES)}")
-
     stream_loop(port, raw_pcm, loop_file=args.loop)
 
 

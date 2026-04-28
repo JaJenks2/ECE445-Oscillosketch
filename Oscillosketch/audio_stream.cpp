@@ -17,7 +17,8 @@ constexpr size_t AUDIO_START_PAYLOAD_LEN = 8;        // u32 rate, u16 packet_fra
 constexpr uint8_t AUDIO_STREAM_CHANNELS = 2;
 constexpr uint8_t AUDIO_STREAM_SAMPLE_BYTES = 2;
 constexpr uint32_t AUDIO_STATUS_PERIOD_MS = 100;
-constexpr uint16_t AUDIO_MAX_RECOVER_GAP_PACKETS = 64;
+constexpr uint16_t AUDIO_MAX_RECOVER_GAP_PACKETS = 16;
+constexpr uint16_t AUDIO_CONCEAL_FADE_FRAMES = 96;
 
 static_assert((AUDIO_BUFFER_FRAMES & (AUDIO_BUFFER_FRAMES - 1)) == 0,
               "AUDIO_BUFFER_FRAMES must be a power of two for the SPSC ring.");
@@ -68,6 +69,12 @@ static volatile uint32_t g_crcErrors = 0;
 static volatile uint32_t g_parserResets = 0;
 static volatile uint32_t g_bufferOverwrites = 0;
 static volatile uint32_t g_underruns = 0;
+static volatile uint32_t g_concealmentFrames = 0;
+
+// Last accepted PCM sample for packet-loss concealment. These are producer-side
+// values updated only by the RX task while pushing accepted DATA packets.
+static int16_t g_lastGoodLeft = 0;
+static int16_t g_lastGoodRight = 0;
 
 static TaskHandle_t g_audioRxTaskHandle = nullptr;
 static uint32_t g_lastStatusMs = 0;
@@ -93,6 +100,9 @@ static void clearRingAndSession() {
   g_parserResets = 0;
   g_bufferOverwrites = 0;
   g_underruns = 0;
+  g_concealmentFrames = 0;
+  g_lastGoodLeft = 0;
+  g_lastGoodRight = 0;
 }
 
 static inline bool ringPush(int16_t left, int16_t right) {
@@ -116,10 +126,31 @@ static inline bool ringPush(int16_t left, int16_t right) {
   return true;
 }
 
-static void ringPushSilence(size_t frames) {
-  for (size_t i = 0; i < frames; ++i) {
+static void ringPushConcealment(size_t frames) {
+  // Preserve the audio timeline when DATA packets are lost, but avoid the
+  // obvious click of stepping instantly from the last real sample to zero.
+  // This is intentionally a short fade-to-center, followed by center samples
+  // for the rest of the missing interval. It is much less objectionable than
+  // replaying later packets early, which makes the song sound sped up.
+  const int16_t startL = g_lastGoodLeft;
+  const int16_t startR = g_lastGoodRight;
+  const size_t fadeFrames = (frames < AUDIO_CONCEAL_FADE_FRAMES) ? frames : AUDIO_CONCEAL_FADE_FRAMES;
+
+  for (size_t i = 0; i < fadeFrames; ++i) {
+    const float t = static_cast<float>(i + 1) / static_cast<float>(fadeFrames);
+    const float gain = 1.0f - t;
+    const int16_t l = static_cast<int16_t>(static_cast<float>(startL) * gain);
+    const int16_t r = static_cast<int16_t>(static_cast<float>(startR) * gain);
+    ringPush(l, r);
+  }
+
+  for (size_t i = fadeFrames; i < frames; ++i) {
     ringPush(0, 0);
   }
+
+  g_lastGoodLeft = 0;
+  g_lastGoodRight = 0;
+  g_concealmentFrames += static_cast<uint32_t>(frames);
 }
 
 static uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t len) {
@@ -157,7 +188,7 @@ static uint32_t packetCrc32(uint8_t type,
 
 static void sendStatusLine(const char* tag) {
   Serial.printf(
-      "%s fill=%u max=%u acc=%lu dup=%lu seqerr=%lu miss=%lu crc=%lu pres=%lu over=%lu und=%lu exp=%u active=%u\n",
+      "%s fill=%u max=%u acc=%lu dup=%lu seqerr=%lu miss=%lu crc=%lu pres=%lu over=%lu und=%lu conceal=%lu exp=%u active=%u\n",
       tag,
       static_cast<unsigned>(ringCount()),
       static_cast<unsigned>(g_maxRingCount),
@@ -169,6 +200,7 @@ static void sendStatusLine(const char* tag) {
       static_cast<unsigned long>(g_parserResets),
       static_cast<unsigned long>(g_bufferOverwrites),
       static_cast<unsigned long>(g_underruns),
+      static_cast<unsigned long>(g_concealmentFrames),
       static_cast<unsigned>(g_expectedSeq),
       audioStreamIsActive() ? 1U : 0U);
 }
@@ -282,22 +314,28 @@ static void handleCompleteDataPacket(uint16_t seq, uint16_t frameCount) {
 
   if (seq != expected) {
     if (sequenceIsOlder(seq, expected)) {
-      // Old duplicate/stale packet from the host or USB buffer. Ignore it.
+      // Old/stale packet from the host or USB stack. Ignore it without
+      // touching playback time.
       g_duplicatePackets++;
       g_lastPacketMs = millis();
       resetParserNoCount();
       return;
     }
 
+    // Future sequence number means one or more DATA packets were lost or
+    // rejected by CRC before this valid packet arrived. Accepting this packet
+    // without occupying the missing time compresses the song timeline and is
+    // the direct cause of the v5 "fast burst" symptom. Instead, insert bounded
+    // fade-to-center concealment for the missing packet duration, then queue
+    // the current packet at the correct time position.
     g_sequenceErrors++;
     g_missingPackets += forwardGap;
 
-    if (forwardGap <= AUDIO_MAX_RECOVER_GAP_PACKETS) {
-      ringPushSilence(static_cast<size_t>(forwardGap) * AUDIO_PACKET_FRAMES);
-    } else {
-      // Very large jump: preserve liveness without inserting seconds of silence.
-      ringPushSilence(AUDIO_PACKET_FRAMES);
-    }
+    const uint16_t packetsToConceal =
+        (forwardGap > AUDIO_MAX_RECOVER_GAP_PACKETS)
+          ? AUDIO_MAX_RECOVER_GAP_PACKETS
+          : forwardGap;
+    ringPushConcealment(static_cast<size_t>(packetsToConceal) * AUDIO_PACKET_FRAMES);
   }
 
   for (size_t i = 0; i < frameCount; ++i) {
@@ -312,7 +350,10 @@ static void handleCompleteDataPacket(uint16_t seq, uint16_t frameCount) {
             static_cast<uint16_t>(g_payload[base + 2]) |
             (static_cast<uint16_t>(g_payload[base + 3]) << 8));
 
-    ringPush(left, right);
+    if (ringPush(left, right)) {
+      g_lastGoodLeft = left;
+      g_lastGoodRight = right;
+    }
   }
 
   g_packetsAccepted++;
@@ -448,7 +489,7 @@ static void parseByte(uint8_t b) {
 
 static void audioRxTask(void* arg) {
   (void)arg;
-  static uint8_t rxBuf[512];
+  static uint8_t rxBuf[1024];
 
   for (;;) {
     maybeSendStatus(false);
@@ -482,9 +523,9 @@ void audioStreamBegin() {
     xTaskCreatePinnedToCore(
         audioRxTask,
         "audio_rx",
-        4096,
+        6144,
         nullptr,
-        2,
+        4,
         &g_audioRxTaskHandle,
         appCore);
   }
