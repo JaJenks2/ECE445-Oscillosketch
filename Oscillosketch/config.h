@@ -58,8 +58,9 @@ constexpr bool INVERT_PONG_RIGHT_PADDLE = true;
 // Fixed live-stream working target.
 constexpr uint32_t AUDIO_SAMPLE_RATE = 16000;
 
-// Input block size processed by the ESP32 each audio update.
-constexpr size_t AUDIO_INPUT_BLOCK_FRAMES = 128;
+// Live playback now consumes one PCM block directly rather than converting it
+// into a replay frame. Keep one transport packet equal to one audio block.
+constexpr size_t AUDIO_INPUT_BLOCK_FRAMES = 256;
 
 // On-the-wire PCM payload size per transport packet.
 constexpr size_t AUDIO_PACKET_FRAMES = 256;
@@ -67,12 +68,12 @@ constexpr size_t AUDIO_PACKET_FRAMES = 256;
 // Ring buffer size on the ESP32 for live serial audio.
 constexpr size_t AUDIO_BUFFER_FRAMES = 8192;
 
-// Derived timing for one audio block.
+// Retained only for older drawing-engine audio storage sizing; live USB audio
+// no longer uses drawing_engine frame replay.
 constexpr uint32_t AUDIO_BLOCK_PERIOD_US =
     static_cast<uint32_t>(
         (1000000ULL * AUDIO_INPUT_BLOCK_FRAMES + AUDIO_SAMPLE_RATE / 2) / AUDIO_SAMPLE_RATE);
 
-// Number of XY replay points generated per audio block.
 constexpr size_t AUDIO_FRAME_MAX_POINTS =
     static_cast<size_t>(
         (static_cast<uint64_t>(REPLAY_RATE_HZ) * AUDIO_INPUT_BLOCK_FRAMES + AUDIO_SAMPLE_RATE / 2) / AUDIO_SAMPLE_RATE);
