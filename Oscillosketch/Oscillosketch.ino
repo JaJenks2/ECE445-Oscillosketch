@@ -10,6 +10,7 @@
 #include "drawing_engine.h"
 #include "input_manager.h"
 #include "app_modes.h"
+#include "audio_mode.h"
 #include "zblank.h"
 
 static TaskHandle_t g_replayTaskHandle = nullptr;
@@ -27,7 +28,12 @@ static void replayTask(void* arg) {
   uint8_t blankCountdown = 0;
 
   for (;;) {
-    const ReplayStep step = drawingGetNextReplayStep();
+    ReplayStep step;
+    if (drawingGetMode() == AppMode::USB_STREAM) {
+      step = audioGetReplayStep();
+    } else {
+      step = drawingGetNextReplayStep();
+    }
 
     if (ENABLE_ZBLANK) {
       if (step.blankBefore) {

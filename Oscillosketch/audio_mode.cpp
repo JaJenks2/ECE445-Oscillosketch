@@ -66,7 +66,7 @@ struct AudioPlaybackState {
 static portMUX_TYPE g_audioCtrlMux = portMUX_INITIALIZER_UNLOCKED;
 
 // UI / app-core owned desired settings.
-static AudioSource g_uiSource = AudioSource::NOISY_COMPOSITE;
+static AudioSource g_uiSource = AudioSource::LIVE_SERIAL;
 static float g_uiHpfHz = AUDIO_HPF_MIN_HZ;
 static float g_uiLpfHz = AUDIO_LPF_MAX_HZ;
 static uint32_t g_uiResyncNonce = 0;
@@ -78,10 +78,11 @@ static volatile uint32_t g_ctrlGeneration = 0;
 // Replay-core owned playback state.
 static AudioPlaybackState g_pb;
 
-static constexpr float AUDIO_CENTER_CODE_F =
-    0.5f * (AUDIO_DRAW_MIN_CODE + AUDIO_DRAW_MAX_CODE);
+static constexpr float AUDIO_CENTER_CODE_F = static_cast<float>(DAC_CENTER_CODE);
+static constexpr float AUDIO_NEG_SPAN_F = static_cast<float>(DAC_CENTER_CODE - AUDIO_DRAW_MIN_CODE);
+static constexpr float AUDIO_POS_SPAN_F = static_cast<float>(AUDIO_DRAW_MAX_CODE - DAC_CENTER_CODE);
 static constexpr float AUDIO_HALF_SPAN_F =
-    0.45f * (AUDIO_DRAW_MAX_CODE - AUDIO_DRAW_MIN_CODE);
+    0.90f * ((AUDIO_NEG_SPAN_F < AUDIO_POS_SPAN_F) ? AUDIO_NEG_SPAN_F : AUDIO_POS_SPAN_F);
 static constexpr float AUDIO_PHASE_INCREMENT =
     static_cast<float>(AUDIO_SAMPLE_RATE) / static_cast<float>(REPLAY_RATE_HZ);
 
@@ -386,7 +387,7 @@ static ReplayStep makeCenterStep() {
 }  // namespace
 
 void audioBegin() {
-  g_uiSource = AudioSource::NOISY_COMPOSITE;
+  g_uiSource = AudioSource::LIVE_SERIAL;
   g_uiHpfHz = AUDIO_HPF_MIN_HZ;
   g_uiLpfHz = AUDIO_LPF_MAX_HZ;
   g_uiResyncNonce = 0;
@@ -430,6 +431,9 @@ void audioUpdate(const InputSnapshot& in) {
 
   if (in.resetPressedEdge) {
     switch (g_uiSource) {
+      case AudioSource::LIVE_SERIAL:
+        g_uiSource = AudioSource::NOISY_COMPOSITE;
+        break;
       case AudioSource::NOISY_COMPOSITE:
         g_uiSource = AudioSource::SMOOTH_LISSAJOUS;
         break;
@@ -438,9 +442,6 @@ void audioUpdate(const InputSnapshot& in) {
         break;
       case AudioSource::HARMONIC_RICH:
         g_uiSource = AudioSource::LIVE_SERIAL;
-        break;
-      case AudioSource::LIVE_SERIAL:
-        g_uiSource = AudioSource::NOISY_COMPOSITE;
         break;
     }
     changed = true;

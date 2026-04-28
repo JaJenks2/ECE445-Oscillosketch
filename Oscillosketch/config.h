@@ -66,7 +66,7 @@ constexpr size_t AUDIO_INPUT_BLOCK_FRAMES = 256;
 constexpr size_t AUDIO_PACKET_FRAMES = 256;
 
 // Ring buffer size on the ESP32 for live serial audio.
-constexpr size_t AUDIO_BUFFER_FRAMES = 8192;
+constexpr size_t AUDIO_BUFFER_FRAMES = 16384;
 
 // Retained only for older drawing-engine audio storage sizing; live USB audio
 // no longer uses drawing_engine frame replay.
@@ -80,11 +80,11 @@ constexpr size_t AUDIO_FRAME_MAX_POINTS =
 
 // Live-serial USB CDC transport.
 constexpr uint32_t AUDIO_SERIAL_BAUD = 2000000;
-constexpr uint32_t AUDIO_STREAM_ACTIVE_TIMEOUT_MS = 500;
+constexpr uint32_t AUDIO_STREAM_ACTIVE_TIMEOUT_MS = 2000;
 
 // Playback gating / rebuffer thresholds.
-constexpr size_t AUDIO_LIVE_START_FILL_FRAMES    = 4096;
-constexpr size_t AUDIO_LIVE_REBUFFER_LOW_FRAMES  = 512;
+constexpr size_t AUDIO_LIVE_START_FILL_FRAMES    = 8192;
+constexpr size_t AUDIO_LIVE_REBUFFER_LOW_FRAMES  = 2048;
 
 // Audio mode uses tighter DAC bounds because laptop-powered operation
 // has shown the bad edge behavior at the wider charger-powered limits.
