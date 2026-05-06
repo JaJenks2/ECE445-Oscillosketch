@@ -88,8 +88,8 @@ constexpr size_t AUDIO_LIVE_REBUFFER_LOW_FRAMES  = 1024;
 
 // Audio mode uses tighter DAC bounds because laptop-powered operation
 // has shown the bad edge behavior at the wider charger-powered limits.
-constexpr uint16_t AUDIO_DRAW_MIN_CODE = 1410;
-constexpr uint16_t AUDIO_DRAW_MAX_CODE = 3730;
+constexpr uint16_t AUDIO_DRAW_MIN_CODE = 153 //1410;
+constexpr uint16_t AUDIO_DRAW_MAX_CODE = 4025 //3730;
 
 // Audio mode cutoff ranges in Hz
 constexpr float AUDIO_HPF_MIN_HZ = 20.0f;
