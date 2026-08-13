@@ -13,7 +13,7 @@ Josh Jenks · Eric Vo
 
 ## Demo
 
-[![Watch the OscilloSketch final project demo](assets/oscillosketch-demo.png)](https://youtu.be/4ph56uAzl1s?si=MtNzPyYdsF7Att4c)
+[![Watch the OscilloSketch final project demo](assets/oscillosketch-demo1.png)](https://youtu.be/4ph56uAzl1s?si=MtNzPyYdsF7Att4c)
 
 **[Watch the final project demo on YouTube →](https://youtu.be/4ph56uAzl1s?si=MtNzPyYdsF7Att4c)**
 
